@@ -6,14 +6,14 @@
 
 | | 工具 | 掃描內容 | 官方 repository | 授權 |
 |---|---|---|---|---|
-| <img src="https://github.com/SonarSource.png?size=64" width="24" height="24" alt="SonarQube"> | **SonarQube** | 原始碼：bug、漏洞、code smell、security hotspot、程式規模 | [SonarSource/sonarqube](https://github.com/SonarSource/sonarqube) | LGPL-3.0 |
-| <img src="https://github.com/snyk.png?size=64" width="24" height="24" alt="Snyk"> | **Snyk** | 開源套件相依性、Code（SAST）、IaC 與 Container 映像檔 | [snyk/cli](https://github.com/snyk/cli) | Apache-2.0 (CLI) |
-| <img src="https://github.com/aquasecurity.png?size=64" width="24" height="24" alt="Trivy"> | **Trivy** | Dockerfile 指令與 Helm chart（`trivy config`） | [aquasecurity/trivy](https://github.com/aquasecurity/trivy) | Apache-2.0 |
-| <img src="https://github.com/semgrep.png?size=64" width="24" height="24" alt="Semgrep"> | **Semgrep** | Code（SAST）；有 Semgrep token 時另含 Supply Chain 漏洞通報 | [semgrep/semgrep](https://github.com/semgrep/semgrep) | LGPL-2.1 |
-| <img src="https://github.com/dependabot.png?size=64" width="24" height="24" alt="Dependabot"> | **Dependabot** | GitHub 上尚未處理的相依套件警示 | [dependabot/dependabot-core](https://github.com/dependabot/dependabot-core) | MIT (core) |
-| <img src="https://github.com/gitleaks.png?size=64" width="24" height="24" alt="Gitleaks"> | **Gitleaks** | git 歷史中任何一次 commit 進去的機密（不是 repository 時則掃檔案） | [gitleaks/gitleaks](https://github.com/gitleaks/gitleaks) | MIT |
-| <img src="https://github.com/Cisco-Talos.png?size=64" width="24" height="24" alt="ClamAV"> | **ClamAV** | checkout 內的已知惡意程式（特徵碼比對） | [Cisco-Talos/clamav](https://github.com/Cisco-Talos/clamav) | GPL-2.0 |
-| <img src="https://github.com/DataDog.png?size=64" width="24" height="24" alt="GuardDog"> | **GuardDog** | 相依套件清單中惡意或有風險的 PyPI / npm / Go 套件 | [DataDog/guarddog](https://github.com/DataDog/guarddog) | Apache-2.0 |
+| <img src="https://github.com/SonarSource.png?size=144" width="72" height="72" alt="SonarQube"> | **SonarQube** | 原始碼：bug、漏洞、code smell、security hotspot、程式規模 | [SonarSource/sonarqube](https://github.com/SonarSource/sonarqube) | LGPL-3.0 |
+| <img src="https://github.com/snyk.png?size=144" width="72" height="72" alt="Snyk"> | **Snyk** | 開源套件相依性、Code（SAST）、IaC 與 Container 映像檔 | [snyk/cli](https://github.com/snyk/cli) | Apache-2.0 (CLI) |
+| <img src="https://github.com/aquasecurity.png?size=144" width="72" height="72" alt="Trivy"> | **Trivy** | Dockerfile 指令與 Helm chart（`trivy config`） | [aquasecurity/trivy](https://github.com/aquasecurity/trivy) | Apache-2.0 |
+| <img src="https://github.com/semgrep.png?size=144" width="72" height="72" alt="Semgrep"> | **Semgrep** | Code（SAST）；有 Semgrep token 時另含 Supply Chain 漏洞通報 | [semgrep/semgrep](https://github.com/semgrep/semgrep) | LGPL-2.1 |
+| <img src="https://github.com/dependabot.png?size=144" width="72" height="72" alt="Dependabot"> | **Dependabot** | GitHub 上尚未處理的相依套件警示 | [dependabot/dependabot-core](https://github.com/dependabot/dependabot-core) | MIT (core) |
+| <img src="https://github.com/gitleaks.png?size=144" width="72" height="72" alt="Gitleaks"> | **Gitleaks** | git 歷史中任何一次 commit 進去的機密（不是 repository 時則掃檔案） | [gitleaks/gitleaks](https://github.com/gitleaks/gitleaks) | MIT |
+| <img src="https://github.com/Cisco-Talos.png?size=144" width="72" height="72" alt="ClamAV"> | **ClamAV** | checkout 內的已知惡意程式（特徵碼比對） | [Cisco-Talos/clamav](https://github.com/Cisco-Talos/clamav) | GPL-2.0 |
+| <img src="https://github.com/DataDog.png?size=144" width="72" height="72" alt="GuardDog"> | **GuardDog** | 相依套件清單中惡意或有風險的 PyPI / npm / Go 套件 | [DataDog/guarddog](https://github.com/DataDog/guarddog) | Apache-2.0 |
 
 圖示為各維護組織的 GitHub 頭像，商標屬於各自的擁有者。Snyk 與 Dependabot 的 CLI／核心是開源的，但掃描結果需要各自的帳號或 GitHub repository。
 
