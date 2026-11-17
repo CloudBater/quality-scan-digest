@@ -7,3 +7,4 @@ qsd-out/
 report.json
 report.html
 .env*
+uv.lock
