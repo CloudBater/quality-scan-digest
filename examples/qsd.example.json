@@ -1,0 +1,30 @@
+{
+  "title": "Example App — Quality & Security",
+  "snyk_severity": "high",
+  "trivy_severity": "CRITICAL,HIGH",
+  "projects": [
+    {
+      "name": "api",
+      "label": "API",
+      "path": "../api",
+      "repo": "your-org/api",
+      "sonar_project_key": "api",
+      "snyk_open_source_args": ["--file=poetry.lock"],
+      "image": "ghcr.io/your-org/api@sha256:<digest of the image you shipped>",
+      "helm": {
+        "chart": "deploy/chart",
+        "values": ["deploy/chart/values.prod.yaml"],
+        "extra_manifests": "deploy/manual"
+      },
+      "coverage": "coverage.xml"
+    },
+    {
+      "name": "web",
+      "label": "Web",
+      "path": "../web",
+      "repo": "your-org/web",
+      "semgrep_config": "p/default",
+      "coverage": "coverage/coverage-summary.json"
+    }
+  ]
+}

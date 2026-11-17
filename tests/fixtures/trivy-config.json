@@ -1,0 +1,19 @@
+{
+ "Results": [
+  {
+   "Target": "Dockerfile",
+   "Misconfigurations": [
+    {
+     "ID": "DS-0031",
+     "Title": "Secrets passed via build-args or envs",
+     "Message": "Possible secret in ENV 'API_KEY'",
+     "Severity": "CRITICAL",
+     "Resolution": "Use secret mounts",
+     "CauseMetadata": {
+      "StartLine": 7
+     }
+    }
+   ]
+  }
+ ]
+}

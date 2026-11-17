@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  
+  "title": "quality-scan-digest report",
+  "type": "object",
+  "required": ["schema_version", "title", "version", "generated_from", "sources", "dedup", "findings"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "generator": {
+      "type": "object",
+      "properties": { "name": { "type": "string" }, "version": { "type": "string" } }
+    },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "title": { "type": "string" },
+    "version": { "type": "string", "description": "Release label of the scanned code" },
+    "generated_from": { "type": "array", "items": { "$ref": "#/$defs/project" } },
+    "sources": {
+      "type": "object",
+      "description": "Keyed \"<project label>: <source>\"",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["collected", "note"],
+        "properties": { "collected": { "type": "boolean" }, "note": { "type": "string" } }
+      }
+    },
+    "dedup": {
+      "type": "object",
+      "required": ["input", "output"],
+      "properties": {
+        "input": { "type": "integer" }, "output": { "type": "integer" },
+        "exact": { "type": "integer" }, "advisory": { "type": "integer" }, "sast": { "type": "integer" }
+      }
+    },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } }
+  },
+  "$defs": {
+    "coverage": {
+      "type": ["object", "null"],
+      "properties": {
+        "pct": { "type": "number" }, "covered": { "type": "integer" }, "measured": { "type": "integer" }
+      }
+    },
+    "project": {
+      "type": "object",
+      "required": ["project", "findings", "security", "sec_crit_high"],
+      "properties": {
+        "project": { "type": "string" },
+        "repo": { "type": "string" },
+        "commit": { "type": "string" },
+        "sonar": { "type": "object", "additionalProperties": { "type": ["string", "null"] } },
+        "coverage": { "$ref": "#/$defs/coverage" },
+        "dependabot": {
+          "type": ["object", "null"],
+          "properties": {
+            "total": { "type": "integer" }, "unique": { "type": "integer" },
+            "by_sev": { "type": "object", "additionalProperties": { "type": "integer" } }
+          }
+        },
+        "deps": { "type": ["integer", "null"] },
+        "findings": { "type": "integer" },
+        "security": { "type": "integer" },
+        "sec_crit_high": { "type": "integer" },
+        "by_source": { "type": "object", "additionalProperties": { "type": "integer" } },
+        "snyk": { "type": "integer" }, "semgrep": { "type": "integer" }, "trivy": { "type": "integer" }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "required": ["id", "proj", "src", "by", "kind", "sev", "rank", "msg", "loc", "line", "ref", "fix", "ids", "cwe", "also"],
+      "properties": {
+        "id": { "type": "string", "description": "Stable fingerprint of project, source, rule, location and line" },
+        "proj": { "type": "string" },
+        "src": { "enum": ["SonarQube", "Snyk", "Trivy", "Semgrep", "Dependabot"] },
+        "by": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "kind": { "type": "string" },
+        "sev": { "type": "string" },
+        "rank": { "type": "integer", "minimum": 0, "maximum": 5 },
+        "msg": { "type": "string" },
+        "loc": { "type": "string", "description": "File path, or package@version" },
+        "line": { "type": ["integer", "string"] },
+        "ref": { "type": "string", "description": "The tool's own rule or advisory id" },
+        "fix": { "type": "string" },
+        "ids": { "type": "array", "items": { "type": "string" } },
+        "cwe": { "type": "array", "items": { "type": "string" } },
+        "also": {
+          "type": "array",
+          "description": "Other sightings merged into this row",
+          "items": {
+            "type": "object",
+            "properties": {
+              "src": { "type": "string" }, "kind": { "type": "string" }, "ref": { "type": "string" },
+              "loc": { "type": "string" }, "line": { "type": ["integer", "string"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}

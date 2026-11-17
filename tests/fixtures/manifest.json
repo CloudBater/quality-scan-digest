@@ -1,0 +1,29 @@
+{
+ "title": "Fixture \u2014 Quality & Security",
+ "version": "v0.0.1",
+ "projects": [
+  {
+   "name": "api",
+   "label": "API",
+   "repo": "example/api",
+   "commit": "abc123",
+   "sonarqube": {
+    "issues": "sonar-issues.json",
+    "hotspots": "sonar-hotspots.json",
+    "measures": "sonar-measures.json"
+   },
+   "snyk": {
+    "Open Source": "snyk-oss.json",
+    "Code": "snyk-code.json",
+    "IaC": "snyk-iac.json",
+    "Container": "missing-container.json"
+   },
+   "trivy": {
+    "Config": "trivy-config.json"
+   },
+   "semgrep": "semgrep.json",
+   "dependabot": "dependabot.json",
+   "coverage": "coverage.xml"
+  }
+ ]
+}

@@ -1,0 +1,73 @@
+{
+ "results": [
+  {
+   "check_id": "python.django.security.injection.sql",
+   "path": "./app/views.py",
+   "start": {
+    "line": 42
+   },
+   "extra": {
+    "severity": "ERROR",
+    "message": "SQL built from user input",
+    "metadata": {
+     "category": "security",
+     "cwe": [
+      "CWE-89: Improper Neutralization of Special Elements used in an SQL Command"
+     ],
+     "shortlink": "https://sg.run/x"
+    }
+   }
+  },
+  {
+   "check_id": "ssc-0001",
+   "path": "poetry.lock",
+   "start": {
+    "line": 10
+   },
+   "extra": {
+    "severity": "CRITICAL",
+    "message": "django is vulnerable",
+    "metadata": {
+     "cve": "CVE-2099-0001",
+     "ghsa": "GHSA-xxxx-yyyy-zzzz"
+    },
+    "sca_info": {
+     "dependency_match": {
+      "found_dependency": {
+       "package": "Django"
+      }
+     }
+    }
+   }
+  },
+  {
+   "check_id": "python.lang.best-practice.open-never-closed",
+   "path": "app/io.py",
+   "start": {
+    "line": 3
+   },
+   "extra": {
+    "severity": "WARNING",
+    "message": "file not closed",
+    "metadata": {
+     "category": "best-practice"
+    }
+   }
+  },
+  {
+   "check_id": "python.lang.best-practice.open-never-closed",
+   "path": "app/io.py",
+   "start": {
+    "line": 3
+   },
+   "extra": {
+    "severity": "WARNING",
+    "message": "file not closed",
+    "metadata": {
+     "category": "best-practice"
+    }
+   }
+  }
+ ],
+ "errors": []
+}

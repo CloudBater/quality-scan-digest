@@ -1,0 +1,30 @@
+{
+  "title": "Example App — Quality & Security",
+  "version": "v1.4.0",
+  "projects": [
+    {
+      "name": "api",
+      "label": "API",
+      "repo": "your-org/api",
+      "commit": "0123abc",
+      "sonarqube": {
+        "issues": "raw/api-sonar-issues.json",
+        "hotspots": "raw/api-sonar-hotspots.json",
+        "measures": "raw/api-sonar-measures.json"
+      },
+      "snyk": {
+        "Open Source": "raw/api-snyk-oss.json",
+        "Code": "raw/api-snyk-code.json",
+        "IaC": "raw/api-snyk-iac.json",
+        "Container": "raw/api-snyk-container.json"
+      },
+      "trivy": {
+        "Config": "raw/api-trivy-config.json",
+        "Chart": "raw/api-trivy-chart.json"
+      },
+      "semgrep": "raw/api-semgrep.json",
+      "dependabot": "raw/api-dependabot.json",
+      "coverage": "raw/coverage.xml"
+    }
+  ]
+}

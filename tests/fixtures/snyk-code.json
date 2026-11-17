@@ -1,0 +1,44 @@
+{
+ "runs": [
+  {
+   "tool": {
+    "driver": {
+     "rules": [
+      {
+       "id": "python/Sqli",
+       "properties": {
+        "cwe": [
+         "CWE-89"
+        ],
+        "problem": {
+         "severity": "error"
+        }
+       }
+      }
+     ]
+    }
+   },
+   "results": [
+    {
+     "ruleId": "python/Sqli",
+     "level": "error",
+     "message": {
+      "text": "Unsanitized input flows into a SQL query"
+     },
+     "locations": [
+      {
+       "physicalLocation": {
+        "artifactLocation": {
+         "uri": "app/views.py"
+        },
+        "region": {
+         "startLine": 42
+        }
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

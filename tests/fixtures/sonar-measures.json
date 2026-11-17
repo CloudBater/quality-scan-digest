@@ -1,0 +1,22 @@
+{
+ "component": {
+  "measures": [
+   {
+    "metric": "ncloc",
+    "value": "1000"
+   },
+   {
+    "metric": "bugs",
+    "value": "2"
+   },
+   {
+    "metric": "code_smells",
+    "value": "7"
+   },
+   {
+    "metric": "vulnerabilities",
+    "value": "1"
+   }
+  ]
+ }
+}

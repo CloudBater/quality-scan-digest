@@ -1,0 +1,11 @@
+{
+ "hotspots": [
+  {
+   "vulnerabilityProbability": "LOW",
+   "message": "Review this regex",
+   "component": "api:app/re.py",
+   "line": 9,
+   "ruleKey": "python:S5852"
+  }
+ ]
+}

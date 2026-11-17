@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quality-scan-digest"
+dynamic = ["version"]
+description = "Run SonarQube, Snyk, Trivy, Semgrep and Dependabot, deduplicate across them, and export one JSON report."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = []
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Security",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.scripts]
+qsd = "qsd.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "qsd.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+qsd = ["data/*.yml"]

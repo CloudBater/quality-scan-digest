@@ -1,0 +1,59 @@
+{
+ "dependencyCount": 42,
+ "vulnerabilities": [
+  {
+   "id": "SNYK-PYTHON-DJANGO-0001",
+   "title": "SQL Injection",
+   "severity": "high",
+   "packageName": "django",
+   "version": "4.2.0",
+   "fixedIn": [
+    "4.2.99"
+   ],
+   "identifiers": {
+    "CVE": [
+     "CVE-2099-0001"
+    ],
+    "GHSA": [],
+    "CWE": [
+     "CWE-89"
+    ]
+   }
+  },
+  {
+   "id": "SNYK-PYTHON-DJANGO-0001",
+   "title": "SQL Injection",
+   "severity": "high",
+   "packageName": "django",
+   "version": "4.2.0",
+   "fixedIn": [
+    "4.2.99"
+   ],
+   "identifiers": {
+    "CVE": [
+     "CVE-2099-0001"
+    ],
+    "GHSA": [],
+    "CWE": [
+     "CWE-89"
+    ]
+   }
+  },
+  {
+   "id": "SNYK-PYTHON-REQUESTS-0002",
+   "title": "Information Exposure",
+   "severity": "medium",
+   "packageName": "requests",
+   "version": "2.0.0",
+   "fixedIn": [],
+   "identifiers": {
+    "CVE": [
+     "CVE-2099-0002"
+    ],
+    "CWE": [
+     "CWE-200"
+    ]
+   }
+  }
+ ]
+}

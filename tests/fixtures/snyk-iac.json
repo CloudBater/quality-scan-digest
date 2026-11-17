@@ -1,0 +1,14 @@
+[
+ {
+  "targetFile": "chart.yaml",
+  "infrastructureAsCodeIssues": [
+   {
+    "id": "SNYK-CC-K8S-1",
+    "title": "Container is running in privileged mode",
+    "severity": "high",
+    "lineNumber": 12,
+    "resolve": "Set privileged to false"
+   }
+  ]
+ }
+]

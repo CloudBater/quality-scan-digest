@@ -1,0 +1,20 @@
+{
+ "issues": [
+  {
+   "type": "VULNERABILITY",
+   "severity": "MAJOR",
+   "message": "Make sure this query is safe",
+   "component": "api:app/views.py",
+   "line": 42,
+   "rule": "pythonsecurity:S3649"
+  },
+  {
+   "type": "CODE_SMELL",
+   "severity": "MINOR",
+   "message": "Rename this function",
+   "component": "api:app/util.py",
+   "line": 5,
+   "rule": "python:S100"
+  }
+ ]
+}
