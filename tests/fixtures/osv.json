@@ -1,0 +1,117 @@
+{
+ "results": [
+  {
+   "source": {
+    "path": "/src/poetry.lock",
+    "type": "lockfile"
+   },
+   "packages": [
+    {
+     "package": {
+      "name": "Django",
+      "version": "4.2.0",
+      "ecosystem": "PyPI"
+     },
+     "groups": [
+      {
+       "ids": [
+        "GHSA-xxxx-yyyy-zzzz"
+       ],
+       "aliases": [
+        "CVE-2099-0001",
+        "GHSA-xxxx-yyyy-zzzz"
+       ],
+       "max_severity": "9.8"
+      }
+     ],
+     "vulnerabilities": [
+      {
+       "id": "GHSA-xxxx-yyyy-zzzz",
+       "aliases": [
+        "CVE-2099-0001"
+       ],
+       "summary": "Django SQL injection",
+       "database_specific": {
+        "severity": "CRITICAL"
+       },
+       "affected": [
+        {
+         "package": {
+          "name": "django",
+          "ecosystem": "PyPI"
+         },
+         "ranges": [
+          {
+           "type": "ECOSYSTEM",
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "4.2.99"
+            }
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "package": {
+      "name": "evil-helper",
+      "version": "1.0.0",
+      "ecosystem": "PyPI"
+     },
+     "groups": [
+      {
+       "ids": [
+        "MAL-2099-1"
+       ],
+       "aliases": [
+        "MAL-2099-1"
+       ],
+       "max_severity": ""
+      }
+     ],
+     "vulnerabilities": [
+      {
+       "id": "MAL-2099-1",
+       "summary": "Malicious code in evil-helper (PyPI)",
+       "affected": []
+      }
+     ]
+    },
+    {
+     "package": {
+      "name": "leftpadish",
+      "version": "0.1.0",
+      "ecosystem": "npm"
+     },
+     "groups": [
+      {
+       "ids": [
+        "GHSA-npm1-npm1-npm1"
+       ],
+       "aliases": [
+        "GHSA-npm1-npm1-npm1"
+       ],
+       "max_severity": ""
+      }
+     ],
+     "vulnerabilities": [
+      {
+       "id": "GHSA-npm1-npm1-npm1",
+       "summary": "ReDoS",
+       "database_specific": {
+        "severity": "MODERATE"
+       },
+       "affected": []
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

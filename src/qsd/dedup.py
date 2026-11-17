@@ -21,7 +21,8 @@ Nothing is merged across projects (keyed by project id, not display label).
 from .model import rank
 
 # Which sighting becomes the primary row of a group: the richest metadata first.
-SOURCE_PREFERENCE = ("Snyk", "Semgrep", "SonarQube", "Trivy", "Dependabot", "GuardDog", "ClamAV", "Gitleaks")
+SOURCE_PREFERENCE = ("Snyk", "Semgrep", "SonarQube", "OSV-Scanner", "Trivy", "Dependabot",
+                     "GuardDog", "ClamAV", "Gitleaks", "zizmor")
 
 CODE_KINDS = {"Vulnerability", "Security Hotspot", "Bug", "Code Smell"}
 DEFAULT_PASSES = ("exact", "advisory")

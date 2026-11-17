@@ -13,7 +13,8 @@ from qsd.cli import _resolve  # noqa: E402
 from qsd.dedup import dedup  # noqa: E402
 from qsd.html_report import render  # noqa: E402
 from qsd.model import finding  # noqa: E402
-from qsd.parsers import clamav, dependabot, gitleaks, guarddog, semgrep, snyk, sonarqube, trivy  # noqa: E402
+from qsd.parsers import (clamav, dependabot, gitleaks, guarddog, osv, semgrep, snyk,  # noqa: E402
+                         sonarqube, trivy, zizmor)
 from qsd.report import ManifestError, build_payload  # noqa: E402
 
 
@@ -144,6 +145,32 @@ class Parsers(unittest.TestCase):
         self.assertEqual(gitleaks.load(tmpjson([]), "A")[1], {"ok": True, "note": ""})
         self.assertFalse(gitleaks.load(tmpjson({"error": "x"}), "A")[1]["ok"])
 
+    def test_osv(self):
+        rows, st = osv.load(fx("osv.json"), "API", root="/src")
+        by = {r["ref"]: r for r in rows}
+        dj = by["GHSA-xxxx-yyyy-zzzz"]
+        self.assertEqual((dj["sev"], dj["loc"], dj["fix"], dj["ids"]),
+                         ("CRITICAL", "poetry.lock: Django@4.2.0", "upgrade to 4.2.99",
+                          ["CVE-2099-0001", "GHSA-XXXX-YYYY-ZZZZ"]))
+        mal = by["MAL-2099-1"]
+        self.assertEqual((mal["kind"], mal["sev"], mal["security"]),
+                         ("Malicious Package", "CRITICAL", True))
+        self.assertEqual(by["GHSA-npm1-npm1-npm1"]["sev"], "MEDIUM")
+        self.assertFalse(osv.load(tmpjson({"error": "x"}), "A")[1]["ok"])
+
+    def test_osv_cvss_bands(self):
+        self.assertEqual([osv._band(s) for s in ("9.0", "7.5", "4", "0.1", "", None)],
+                         ["CRITICAL", "HIGH", "MEDIUM", "LOW", "", ""])
+
+    def test_zizmor(self):
+        rows, st = zizmor.load(fx("zizmor.json"), "API", root="/src")
+        self.assertEqual([(r["ref"], r["sev"], r["loc"], r["line"]) for r in rows],
+                         [("template-injection", "HIGH", ".github/workflows/ci.yml", 12),
+                          ("dependabot-cooldown", "MEDIUM", ".github/dependabot.yml", 8)])
+        self.assertTrue(rows[0]["security"])
+        self.assertIn("confidence high", rows[0]["msg"])
+        self.assertFalse(zizmor.load(tmpjson({"error": "x"}), "A")[1]["ok"])
+
     def test_unreadable_file_is_a_note_not_a_crash(self):
         rows, st = snyk.load(fx("does-not-exist.json"), "Code", "API")
         self.assertEqual((rows, st["ok"]), ([], False))
@@ -206,15 +233,16 @@ class EndToEnd(unittest.TestCase):
         self.p = build_payload(load_manifest())
 
     def test_counts(self):
-        # 15 raw rows + ClamAV 1 + GuardDog 3 + Gitleaks 1; 1 exact duplicate; 3 advisory merges.
-        self.assertEqual(self.p["dedup"], {"input": 20, "passes": ["exact", "advisory"],
-                                           "exact": 1, "advisory": 3, "output": 16})
+        # 15 raw + ClamAV 1 + GuardDog 3 + Gitleaks 1 + OSV 3 + zizmor 2 = 25;
+        # 1 exact duplicate; 4 advisory merges (Django seen by Snyk, Semgrep, OSV, Dependabot x2).
+        self.assertEqual(self.p["dedup"], {"input": 25, "passes": ["exact", "advisory"],
+                                           "exact": 1, "advisory": 4, "output": 20})
 
     def test_four_sightings_one_row_most_severe_wins(self):
         dj = [r for r in self.p["findings"] if "CVE-2099-0001" in r["ids"]]
         self.assertEqual(len(dj), 1)
-        self.assertEqual(dj[0]["by"], ["Snyk", "Semgrep", "Dependabot"])
-        self.assertEqual((dj[0]["sev"], len(dj[0]["also"])), ("CRITICAL", 3))
+        self.assertEqual(dj[0]["by"], ["Snyk", "Semgrep", "OSV-Scanner", "Dependabot"])
+        self.assertEqual((dj[0]["sev"], len(dj[0]["also"])), ("CRITICAL", 4))
 
     def test_security_counts_include_dependencies_and_malware(self):
         s = self.p["generated_from"][0]
@@ -227,7 +255,7 @@ class EndToEnd(unittest.TestCase):
         self.assertFalse(s["API: Snyk Container"]["collected"])
         self.assertTrue(s["API: SonarQube"]["collected"])
         self.assertTrue(s["API: ClamAV"]["complete"])
-        self.assertEqual(sum(v["collected"] for v in s.values()), 11)
+        self.assertEqual(sum(v["collected"] for v in s.values()), 13)
         self.assertNotIn("ghp_FAKE", json.dumps(self.p))
 
     def test_backward_compatible_shape(self):
@@ -243,7 +271,7 @@ class EndToEnd(unittest.TestCase):
     def test_ids_unique_even_without_dedup(self):
         p = build_payload(load_manifest(), passes=())
         ids = [r["id"] for r in p["findings"]]
-        self.assertEqual((len(ids), len(set(ids))), (20, 20))
+        self.assertEqual((len(ids), len(set(ids))), (25, 25))
 
     def test_rows_sorted_by_severity(self):
         ranks = [r["rank"] for r in self.p["findings"]]
@@ -307,7 +335,7 @@ class Cli(unittest.TestCase):
             with open(out) as fh:
                 p = json.load(fh)
             self.assertEqual((p["version"], len(p["findings"]), p["settings"]["dedup"]),
-                             ("v9", 16, "exact,advisory"))
+                             ("v9", 20, "exact,advisory"))
             r = self.run_cli("digest", fx("manifest.json"), "--json-out", out, "--strict")
             self.assertEqual(r.returncode, 2)
 

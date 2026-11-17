@@ -263,7 +263,9 @@
             "Dependabot",
             "ClamAV",
             "GuardDog",
-            "Gitleaks"
+            "Gitleaks",
+            "OSV-Scanner",
+            "zizmor"
           ]
         },
         "by": {

@@ -129,6 +129,11 @@ def _resolve(manifest, base):
         for k in ("snyk", "trivy"):
             if isinstance(p.get(k), dict):
                 p[k] = {n: fix(v) for n, v in p[k].items()}
+        for k in ("osv", "zizmor"):
+            if isinstance(p.get(k), str):
+                p[k] = fix(p[k])
+            elif isinstance(p.get(k), dict):
+                p[k]["path"] = fix(p[k].get("path"))
         if isinstance(p.get("guarddog"), dict):
             for n, g in p["guarddog"].items():
                 if isinstance(g, dict):

@@ -46,3 +46,13 @@ def failed(note):
 
 def unreadable(path, exc):
     return failed(f"{os.path.basename(path)}: unreadable ({exc.__class__.__name__})")
+
+
+def rel(path, root):
+    """Path relative to the scanned root, so reports carry no machine-specific prefix."""
+    path = path or ""
+    if root and path.startswith(root.rstrip("/") + "/"):
+        path = path[len(root.rstrip("/")) + 1:]
+    while path.startswith("./"):
+        path = path[2:]
+    return path

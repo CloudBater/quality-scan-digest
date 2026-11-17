@@ -15,10 +15,12 @@ from .parsers import coverage as p_coverage
 from .parsers import dependabot as p_dependabot
 from .parsers import gitleaks as p_gitleaks
 from .parsers import guarddog as p_guarddog
+from .parsers import osv as p_osv
 from .parsers import semgrep as p_semgrep
 from .parsers import snyk as p_snyk
 from .parsers import sonarqube as p_sonar
 from .parsers import trivy as p_trivy
+from .parsers import zizmor as p_zizmor
 
 SCHEMA_VERSION = "1.0"
 
@@ -135,6 +137,13 @@ def collect_project(cfg, sonar_token=""):
 
     if "gitleaks" in cfg:
         file_source("Gitleaks", cfg["gitleaks"], lambda p: p_gitleaks.load(p, label, pid))
+
+    # Both may name a scan root so absolute paths in their output become relative.
+    for key, name, parser in (("osv", "OSV-Scanner", p_osv), ("zizmor", "zizmor", p_zizmor)):
+        if key in cfg:
+            spec = cfg[key] if isinstance(cfg[key], dict) else {"path": cfg[key]}
+            file_source(name, spec.get("path"), lambda p, s=spec, m=parser: m.load(
+                p, label, pid, root=s.get("root", "")))
 
     for scan, g in (cfg.get("guarddog") or {}).items():
         g = g if isinstance(g, dict) else {"path": g}

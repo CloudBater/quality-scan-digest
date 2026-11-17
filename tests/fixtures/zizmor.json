@@ -1,0 +1,101 @@
+[
+ {
+  "ident": "template-injection",
+  "desc": "template-injection finding",
+  "url": "https://docs.zizmor.sh/audits/#template-injection",
+  "determinations": {
+   "confidence": "High",
+   "severity": "High",
+   "persona": "Regular"
+  },
+  "locations": [
+   {
+    "symbolic": {
+     "key": {
+      "Local": {
+       "verbatim_path": "/src/.github/workflows/ci.yml"
+      }
+     },
+     "annotation": "attacker-controlled expansion",
+     "kind": "Primary"
+    },
+    "concrete": {
+     "location": {
+      "start_point": {
+       "row": 11,
+       "column": 4
+      }
+     }
+    }
+   }
+  ],
+  "ignored": false,
+  "fixes": []
+ },
+ {
+  "ident": "unpinned-uses",
+  "desc": "unpinned-uses finding",
+  "url": "https://docs.zizmor.sh/audits/#unpinned-uses",
+  "determinations": {
+   "confidence": "High",
+   "severity": "High",
+   "persona": "Regular"
+  },
+  "locations": [
+   {
+    "symbolic": {
+     "key": {
+      "Local": {
+       "verbatim_path": "/src/.github/workflows/ci.yml"
+      }
+     },
+     "annotation": "attacker-controlled expansion",
+     "kind": "Primary"
+    },
+    "concrete": {
+     "location": {
+      "start_point": {
+       "row": 20,
+       "column": 4
+      }
+     }
+    }
+   }
+  ],
+  "ignored": true,
+  "fixes": []
+ },
+ {
+  "ident": "dependabot-cooldown",
+  "desc": "dependabot-cooldown finding",
+  "url": "https://docs.zizmor.sh/audits/#dependabot-cooldown",
+  "determinations": {
+   "confidence": "High",
+   "severity": "Medium",
+   "persona": "Regular"
+  },
+  "locations": [
+   {
+    "symbolic": {
+     "key": {
+      "Local": {
+       "verbatim_path": "/src/.github/dependabot.yml"
+      }
+     },
+     "annotation": "attacker-controlled expansion",
+     "kind": "Primary"
+    },
+    "concrete": {
+     "location": {
+      "start_point": {
+       "row": 7,
+       "column": 4
+      }
+     }
+    }
+   }
+  ],
+  "ignored": false,
+  "fixes": []
+ }
+]

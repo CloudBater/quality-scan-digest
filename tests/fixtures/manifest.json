@@ -32,7 +32,15 @@
      "manifest": "requirements.txt"
     }
    },
-   "gitleaks": "gitleaks.json"
+   "gitleaks": "gitleaks.json",
+   "osv": {
+    "path": "osv.json",
+    "root": "/src"
+   },
+   "zizmor": {
+    "path": "zizmor.json",
+    "root": "/src"
+   }
   }
  ]
 }

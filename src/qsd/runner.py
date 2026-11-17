@@ -26,7 +26,8 @@ from importlib import resources
 from .model import safe_name
 from .parsers.sonarqube import MEASURE_KEYS, Forbidden, SonarError, api, fetch_all
 
-TOOLS = ("sonarqube", "snyk", "trivy", "semgrep", "dependabot", "clamav", "guarddog", "gitleaks")
+TOOLS = ("sonarqube", "snyk", "trivy", "semgrep", "dependabot", "osv", "zizmor", "clamav",
+         "guarddog", "gitleaks")
 
 # Pinned by digest: a moving tag changes the code that runs with your token.
 SCANNER_IMAGE = os.environ.get(
@@ -41,6 +42,13 @@ GUARDDOG_ECOSYSTEMS = ("pypi", "npm", "go", "github_action")
 GITLEAKS_IMAGE = os.environ.get(
     "QSD_GITLEAKS_IMAGE",  # v8.24.3
     "zricethezav/gitleaks@sha256:e1b35e12a8c6fa8901f060459cfb6b2fc4c484d3afbe3b029733a3bbfab07055")
+
+OSV_IMAGE = os.environ.get(
+    "QSD_OSV_IMAGE",  # v2.7.1
+    "ghcr.io/google/osv-scanner@sha256:a70ffffc2bfd33482953e5d6b64c6fcdb30239717a07b0f0d3ab2859ce3e4cde")
+ZIZMOR_IMAGE = os.environ.get(
+    "QSD_ZIZMOR_IMAGE",  # 1.32.0
+    "ghcr.io/zizmorcore/zizmor@sha256:3014cc8f68f663935f69b3c3e0e41f5ce102b268d97db13db0f62208747f860d")
 
 # A `semgrep ci` inside a pull_request job would otherwise scan only the diff.
 _DIFF_AWARE_ENV = ("GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_BASE_REF",
@@ -447,6 +455,14 @@ def _scan_project(pr, raw, logs, tools, settings):
                 notes["Dependabot"] = "gh api failed, see logs"
                 _rm(out["dependabot"])
 
+    if "osv" in tools:
+        out["osv"] = {"path": f"{stem}-osv.json"}
+        _osv(cfg, path, out["osv"], lg("osv"), notes)
+
+    if "zizmor" in tools:
+        out["zizmor"] = {"path": f"{stem}-zizmor.json"}
+        _zizmor(path, out["zizmor"], lg("zizmor"), notes)
+
     if "clamav" in tools:
         out["clamav"] = f"{stem}-clamav.txt"
         _clamav(path, out["clamav"], lg("clamav"), notes)
@@ -587,3 +603,69 @@ def _gitleaks(cfg, path, out, logfile, notes):
     if rc != 0 or not _nonempty(out):
         notes["Gitleaks"] = f"gitleaks exited {rc}, see logs"
         _rm(out)
+
+
+def _native_or_container(tool, image, path, args, target_args):
+    """(cmd, root): the native CLI on `path`, else the pinned image with the
+    checkout mounted read-only. Output always goes to stdout."""
+    if have(tool):
+        return [tool, *args, *target_args(path)], path
+    if have("docker"):
+        return (["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
+                 "-v", f"{path}:/src:ro", image, *args, *target_args("/src")], "/src")
+    return None, None
+
+
+def _capture(cmd, out, logfile):
+    with open(out, "w") as fh, open(logfile, "w") as err:
+        return subprocess.run(cmd, stdout=fh, stderr=err).returncode
+
+
+def _log_has(logfile, text):
+    try:
+        with open(logfile, encoding="utf-8", errors="replace") as fh:
+            return text in fh.read()
+    except OSError:
+        return False
+
+
+def _osv(cfg, path, spec, logfile, notes):
+    """Queries osv.dev with package names and versions (not code). Set
+    `osv_offline` to use downloaded databases instead (native CLI only)."""
+    args = ["scan", "source", "-r", "--format", "json"]
+    if cfg.get("osv_offline"):
+        if not have("osv-scanner"):
+            notes["OSV-Scanner"] = "osv_offline needs the native osv-scanner"
+            return
+        args += ["--offline-vulnerabilities", "--download-offline-databases"]
+    cmd, root = _native_or_container("osv-scanner", OSV_IMAGE, path, args, lambda t: [t])
+    if not cmd:
+        notes["OSV-Scanner"] = "neither osv-scanner nor docker available"
+        return
+    log(f"OSV-Scanner: {cfg['name']}")
+    spec["root"] = root
+    rc = _capture(cmd, spec["path"], logfile)
+    # 0 clean, 1 vulnerabilities found, 128 no package manifests; anything else failed.
+    if rc in (0, 1) and _nonempty(spec["path"]):
+        return
+    notes["OSV-Scanner"] = ("no package manifests found" if rc == 128
+                            else f"osv-scanner exited {rc}, see logs")
+    _rm(spec["path"])
+
+
+def _zizmor(path, spec, logfile, notes):
+    """Offline audits only: no GitHub token, nothing leaves the machine. With
+    --no-exit-codes a run that finds problems exits 0, so nonzero is a failure."""
+    args = ["--offline", "--no-exit-codes", "--format", "json"]
+    cmd, root = _native_or_container("zizmor", ZIZMOR_IMAGE, path, args, lambda t: [t])
+    if not cmd:
+        notes["zizmor"] = "neither zizmor nor docker available"
+        return
+    log("zizmor: GitHub Actions workflows")
+    spec["root"] = root
+    rc = _capture(cmd, spec["path"], logfile)
+    if rc == 0 and _nonempty(spec["path"]):
+        return
+    notes["zizmor"] = ("no GitHub Actions workflows found" if _log_has(logfile, "no inputs collected")
+                       else f"zizmor exited {rc}, see logs")
+    _rm(spec["path"])

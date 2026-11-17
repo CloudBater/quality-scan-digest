@@ -2,7 +2,7 @@
 
 English | [繁體中文](README.zh-TW.md)
 
-Run eight code, supply-chain, secret and malware scanners against your repositories, merge what
+Run ten code, supply-chain, CI/CD, secret and malware scanners against your repositories, merge what
 they report into **one deduplicated list**, and export it as **JSON** (plus an optional
 self-contained HTML report).
 
@@ -13,6 +13,8 @@ self-contained HTML report).
 | <img src="https://github.com/aquasecurity.png?size=144" width="72" height="72" alt="Trivy"> | **Trivy** | Dockerfile instructions and Helm charts (`trivy config`) | [aquasecurity/trivy](https://github.com/aquasecurity/trivy) | Apache-2.0 |
 | <img src="https://github.com/semgrep.png?size=144" width="72" height="72" alt="Semgrep"> | **Semgrep** | Code (SAST) and, with a Semgrep token, Supply Chain advisories | [semgrep/semgrep](https://github.com/semgrep/semgrep) | LGPL-2.1 |
 | <img src="https://github.com/dependabot.png?size=144" width="72" height="72" alt="Dependabot"> | **Dependabot** | Open dependency alerts, fetched from GitHub | [dependabot/dependabot-core](https://github.com/dependabot/dependabot-core) | MIT (core) |
+| <img src="https://github.com/google.png?size=144" width="72" height="72" alt="OSV-Scanner"> | **OSV-Scanner** | Lockfiles across ecosystems against the OSV database, including OpenSSF malicious-package (`MAL-`) advisories | [google/osv-scanner](https://github.com/google/osv-scanner) | Apache-2.0 |
+| <img src="https://github.com/zizmorcore.png?size=144" width="72" height="72" alt="zizmor"> | **zizmor** | GitHub Actions workflow security: template injection, excessive permissions, unpinned actions, credentials left by checkout | [zizmorcore/zizmor](https://github.com/zizmorcore/zizmor) | MIT |
 | <img src="https://github.com/gitleaks.png?size=144" width="72" height="72" alt="Gitleaks"> | **Gitleaks** | Secrets committed anywhere in git history (or in the files, outside a repo) | [gitleaks/gitleaks](https://github.com/gitleaks/gitleaks) | MIT |
 | <img src="https://github.com/Cisco-Talos.png?size=144" width="72" height="72" alt="ClamAV"> | **ClamAV** | Known malware in the checkout (signature scan) | [Cisco-Talos/clamav](https://github.com/Cisco-Talos/clamav) | GPL-2.0 |
 | <img src="https://github.com/DataDog.png?size=144" width="72" height="72" alt="GuardDog"> | **GuardDog** | Malicious or risky PyPI / npm / Go packages in your dependency manifests | [DataDog/guarddog](https://github.com/DataDog/guarddog) | Apache-2.0 |
@@ -26,8 +28,8 @@ that is started, scanned against, exported and destroyed in one run.
 
 ## Why
 
-**The tools overlap.** Snyk, Semgrep Supply Chain, Trivy and Dependabot read the same
-advisory databases, so one vulnerable package can show up three or four times and
+**The tools overlap.** Snyk, Semgrep Supply Chain, OSV-Scanner, Trivy and Dependabot read the same
+advisory databases, so one vulnerable package can show up four or five times and
 every headline number is inflated. `qsd` lists each problem once, records every scanner
 that saw it, and keeps the other sightings in full.
 
@@ -39,7 +41,7 @@ as an empty, clean result. `--strict` turns any gap into a failing exit code.
 ## Install
 
 ```bash
-pip install git+https://github.com/CloudBater/quality-scan-digest@v0.2.0
+pip install git+https://github.com/CloudBater/quality-scan-digest@v0.3.0
 qsd --version
 ```
 
@@ -47,7 +49,7 @@ Install whichever scanners you want; each is optional and a missing one is repor
 `docker` (SonarQube, and ClamAV if `clamscan` is not installed),
 [`snyk`](https://docs.snyk.io/snyk-cli), [`trivy`](https://trivy.dev),
 [`semgrep`](https://semgrep.dev/docs/getting-started/), [`gh`](https://cli.github.com)
-(Dependabot), [`gitleaks`](https://github.com/gitleaks/gitleaks) (or `docker`), [`clamscan`](https://docs.clamav.net) with a current database
+(Dependabot), [`gitleaks`](https://github.com/gitleaks/gitleaks), [`osv-scanner`](https://github.com/google/osv-scanner) and [`zizmor`](https://github.com/zizmorcore/zizmor) (or `docker` for these three), [`clamscan`](https://docs.clamav.net) with a current database
 (`freshclam`), [`guarddog`](https://github.com/DataDog/guarddog), and `helm` if you scan charts.
 
 ## Usage
@@ -78,6 +80,7 @@ the config file and may not point outside the project. See
 | `image` | Image for Snyk Container. Pin a **digest** of what you shipped, not a moving tag |
 | `helm.chart`, `helm.values`, `helm.extra_manifests` | Rendered into a temp dir (removed afterwards) before IaC scanning; Snyk cannot parse raw templates |
 | `semgrep_config` | Ruleset used when `SEMGREP_APP_TOKEN` is not set (default `p/default`) |
+| `osv_offline` | `true`: OSV-Scanner downloads offline databases instead of querying osv.dev (native CLI only) |
 | `gitleaks_mode` | `git` (full history; default inside a repository) or `dir` (files only) |
 | `gitleaks_log_opts` | Limit the history, e.g. `origin/main..HEAD` |
 | `guarddog` | List of `{"ecosystem": "pypi" \| "npm" \| "go" \| "github_action", "manifest": "requirements.txt"}` |
@@ -89,7 +92,8 @@ findings above a floor is not the same claim as zero findings.
 
 Environment: `SEMGREP_APP_TOKEN` switches Semgrep to `semgrep ci` with your
 organisation's policy (always a full scan, never diff-aware). `QSD_SONAR_PORT`,
-`QSD_SCANNER_IMAGE`, `QSD_CLAMAV_IMAGE` and `QSD_GITLEAKS_IMAGE` override the defaults. Snyk and `gh` use
+`QSD_SCANNER_IMAGE`, `QSD_CLAMAV_IMAGE`, `QSD_GITLEAKS_IMAGE`, `QSD_OSV_IMAGE` and `QSD_ZIZMOR_IMAGE` override
+the defaults. Snyk and `gh` use
 their own login.
 
 ### 2. Digest outputs you already have (CI)
@@ -154,7 +158,7 @@ Parsers themselves keep every affected version and manifest.
 
 Severities are normalised onto one scale (`rank` 0 = CRITICAL/BLOCKER … 4 = INFO).
 `security` is decided by what a finding is (dependency, container, IaC,
-misconfiguration, vulnerability, hotspot, secret, malware, package risk), not by which scanner
+misconfiguration, vulnerability, hotspot, secret, workflow, malware, package risk), not by which scanner
 reported it. `id` is a content hash, unique within a report; it changes when the
 finding's message, location or line changes.
 
@@ -165,12 +169,15 @@ finding's message, location or line changes.
 - The throwaway SonarQube binds to `127.0.0.1` on a random port, uses its documented
   first-boot `admin` login only to mint a token, then rotates that password. Each run
   uses its own compose project and removes it, with its volumes, at the end.
-- The scanner, ClamAV and Gitleaks images are pinned by digest; Actions are pinned by commit SHA.
+- The scanner, ClamAV, Gitleaks, OSV-Scanner and zizmor images are pinned by digest; Actions are pinned by commit SHA.
 - Gitleaks uses the free MIT CLI, which needs no licence key (only `gitleaks-action` asks
   for one, for organisation repos). It always runs with `--redact`, and `qsd` keeps only
   the rule, file, line and commit: never the secret, the commit author, email or message.
   Your repo's `.gitleaks.toml` and `.gitleaksignore` apply. A secret found in history must
   be revoked; deleting it from the code does not undo the leak.
+- OSV-Scanner sends package names and versions (never code) to osv.dev by default; set
+  `osv_offline` to use downloaded databases instead. zizmor always runs `--offline`: no
+  GitHub token, nothing leaves the machine.
 - On Linux, SonarQube needs `vm.max_map_count >= 524288` on the host.
 - GuardDog downloads each listed dependency from its registry to analyse it (it does
   not install or execute it). Capability rules (`capability-*`) only say what a package
