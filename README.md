@@ -6,16 +6,18 @@ Run eight code, supply-chain, secret and malware scanners against your repositor
 they report into **one deduplicated list**, and export it as **JSON** (plus an optional
 self-contained HTML report).
 
-| Tool | What it reads |
-|---|---|
-| **SonarQube** | Source: bugs, vulnerabilities, code smells, security hotspots, size |
-| **Snyk** | Open Source dependencies, Code (SAST), IaC and Container images |
-| **Trivy** | Dockerfile instructions and Helm charts (`trivy config`) |
-| **Semgrep** | Code (SAST) and, with a Semgrep token, Supply Chain advisories |
-| **Dependabot** | Open dependency alerts, fetched from GitHub |
-| **Gitleaks** | Secrets committed anywhere in git history (or in the files, outside a repo) |
-| **ClamAV** | Known malware in the checkout (signature scan) |
-| **GuardDog** | Malicious or risky PyPI / npm / Go packages in your dependency manifests |
+| | Tool | What it reads | Official repository | Licence |
+|---|---|---|---|---|
+| <img src="https://github.com/SonarSource.png?size=64" width="24" height="24" alt="SonarQube"> | **SonarQube** | Source: bugs, vulnerabilities, code smells, security hotspots, size | [SonarSource/sonarqube](https://github.com/SonarSource/sonarqube) | LGPL-3.0 |
+| <img src="https://github.com/snyk.png?size=64" width="24" height="24" alt="Snyk"> | **Snyk** | Open Source dependencies, Code (SAST), IaC and Container images | [snyk/cli](https://github.com/snyk/cli) | Apache-2.0 (CLI) |
+| <img src="https://github.com/aquasecurity.png?size=64" width="24" height="24" alt="Trivy"> | **Trivy** | Dockerfile instructions and Helm charts (`trivy config`) | [aquasecurity/trivy](https://github.com/aquasecurity/trivy) | Apache-2.0 |
+| <img src="https://github.com/semgrep.png?size=64" width="24" height="24" alt="Semgrep"> | **Semgrep** | Code (SAST) and, with a Semgrep token, Supply Chain advisories | [semgrep/semgrep](https://github.com/semgrep/semgrep) | LGPL-2.1 |
+| <img src="https://github.com/dependabot.png?size=64" width="24" height="24" alt="Dependabot"> | **Dependabot** | Open dependency alerts, fetched from GitHub | [dependabot/dependabot-core](https://github.com/dependabot/dependabot-core) | MIT (core) |
+| <img src="https://github.com/gitleaks.png?size=64" width="24" height="24" alt="Gitleaks"> | **Gitleaks** | Secrets committed anywhere in git history (or in the files, outside a repo) | [gitleaks/gitleaks](https://github.com/gitleaks/gitleaks) | MIT |
+| <img src="https://github.com/Cisco-Talos.png?size=64" width="24" height="24" alt="ClamAV"> | **ClamAV** | Known malware in the checkout (signature scan) | [Cisco-Talos/clamav](https://github.com/Cisco-Talos/clamav) | GPL-2.0 |
+| <img src="https://github.com/DataDog.png?size=64" width="24" height="24" alt="GuardDog"> | **GuardDog** | Malicious or risky PyPI / npm / Go packages in your dependency manifests | [DataDog/guarddog](https://github.com/DataDog/guarddog) | Apache-2.0 |
+
+Logos are each maintainer's GitHub avatar; trademarks belong to their owners. Snyk and Dependabot ship open-source clients, but results need a Snyk account or a GitHub repository.
 
 Test coverage (Cobertura XML or an Istanbul `coverage-summary.json`) can ride along.
 
