@@ -32,7 +32,8 @@
           "ecosystem": "pypi",
           "manifest": "requirements.txt"
         }
-      }
+      },
+      "gitleaks": "raw/api-gitleaks.json"
     }
   ],
   "settings": {

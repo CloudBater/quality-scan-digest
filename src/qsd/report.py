@@ -13,6 +13,7 @@ from .model import fingerprint, is_security, rank, safe_name
 from .parsers import clamav as p_clamav
 from .parsers import coverage as p_coverage
 from .parsers import dependabot as p_dependabot
+from .parsers import gitleaks as p_gitleaks
 from .parsers import guarddog as p_guarddog
 from .parsers import semgrep as p_semgrep
 from .parsers import snyk as p_snyk
@@ -131,6 +132,9 @@ def collect_project(cfg, sonar_token=""):
 
     if "clamav" in cfg:
         file_source("ClamAV", cfg["clamav"], lambda p: p_clamav.load(p, label, pid))
+
+    if "gitleaks" in cfg:
+        file_source("Gitleaks", cfg["gitleaks"], lambda p: p_gitleaks.load(p, label, pid))
 
     for scan, g in (cfg.get("guarddog") or {}).items():
         g = g if isinstance(g, dict) else {"path": g}

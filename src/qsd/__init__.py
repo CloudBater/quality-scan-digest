@@ -1,3 +1,3 @@
-"""quality-scan-digest: run five code scanners, merge and deduplicate, export JSON."""
+"""quality-scan-digest: run code, secret and malware scanners, merge and deduplicate, export JSON."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

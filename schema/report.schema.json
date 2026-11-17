@@ -262,7 +262,8 @@
             "Semgrep",
             "Dependabot",
             "ClamAV",
-            "GuardDog"
+            "GuardDog",
+            "Gitleaks"
           ]
         },
         "by": {

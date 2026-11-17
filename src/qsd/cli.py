@@ -123,7 +123,7 @@ def _resolve(manifest, base):
     for p in manifest.get("projects", []):
         if not isinstance(p, dict):
             continue
-        for k in ("semgrep", "dependabot", "coverage", "clamav"):
+        for k in ("semgrep", "dependabot", "coverage", "clamav", "gitleaks"):
             if isinstance(p.get(k), str):
                 p[k] = fix(p[k])
         for k in ("snyk", "trivy"):

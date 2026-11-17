@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "quality-scan-digest"
 dynamic = ["version"]
-description = "Run SonarQube, Snyk, Trivy, Semgrep, Dependabot, ClamAV and GuardDog, deduplicate across them, and export one JSON report."
+description = "Run SonarQube, Snyk, Trivy, Semgrep, Dependabot, Gitleaks, ClamAV and GuardDog, deduplicate across them, and export one JSON report."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

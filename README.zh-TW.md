@@ -2,7 +2,7 @@
 
 [English](README.md) | 繁體中文
 
-對你的 repository 執行七種程式碼、供應鏈與惡意程式掃描工具，把結果合併成**一份去除重複的清單**，並輸出成 **JSON**（也可以另外產生一份獨立的 HTML 報告）。
+對你的 repository 執行八種程式碼、供應鏈、機密外洩與惡意程式掃描工具，把結果合併成**一份去除重複的清單**，並輸出成 **JSON**（也可以另外產生一份獨立的 HTML 報告）。
 
 | 工具 | 掃描內容 |
 |---|---|
@@ -11,6 +11,7 @@
 | **Trivy** | Dockerfile 指令與 Helm chart（`trivy config`） |
 | **Semgrep** | Code（SAST）；有 Semgrep token 時另含 Supply Chain 漏洞通報 |
 | **Dependabot** | GitHub 上尚未處理的相依套件警示 |
+| **Gitleaks** | git 歷史中任何一次 commit 進去的機密（不是 repository 時則掃檔案） |
 | **ClamAV** | checkout 內的已知惡意程式（特徵碼比對） |
 | **GuardDog** | 相依套件清單中惡意或有風險的 PyPI / npm / Go 套件 |
 
@@ -27,7 +28,7 @@
 ## 安裝
 
 ```bash
-pip install git+https://github.com/CloudBater/quality-scan-digest@v0.1.0
+pip install git+https://github.com/CloudBater/quality-scan-digest@v0.2.0
 qsd --version
 ```
 
@@ -35,6 +36,7 @@ qsd --version
 `docker`（SonarQube；沒有 `clamscan` 時 ClamAV 也用它）、
 [`snyk`](https://docs.snyk.io/snyk-cli)、[`trivy`](https://trivy.dev)、
 [`semgrep`](https://semgrep.dev/docs/getting-started/)、[`gh`](https://cli.github.com)（Dependabot）、
+[`gitleaks`](https://github.com/gitleaks/gitleaks)（或用 `docker`）、
 有最新特徵碼資料庫的 [`clamscan`](https://docs.clamav.net)（`freshclam`）、
 [`guarddog`](https://github.com/DataDog/guarddog)，以及要掃 chart 時的 `helm`。
 
@@ -61,12 +63,14 @@ qsd scan examples/qsd.example.json --release v1.4.0 --out-dir qsd-out
 | `image` | 給 Snyk Container 掃的映像檔。請固定成實際出貨版本的 **digest**，不要用會變動的 tag |
 | `helm.chart`、`helm.values`、`helm.extra_manifests` | 掃 IaC 前先 render 到暫存目錄（用完即刪）；Snyk 無法直接讀 Helm 範本 |
 | `semgrep_config` | 沒設定 `SEMGREP_APP_TOKEN` 時使用的規則集（預設 `p/default`） |
+| `gitleaks_mode` | `git`（掃完整歷史；在 repository 內的預設值）或 `dir`（只掃檔案） |
+| `gitleaks_log_opts` | 限縮掃描的歷史範圍，例如 `origin/main..HEAD` |
 | `guarddog` | 清單，例如 `{"ecosystem": "pypi" \| "npm" \| "go" \| "github_action", "manifest": "requirements.txt"}` |
 | `coverage` | checkout 內的覆蓋率檔案 |
 
 最上層可設定 `snyk_severity`（預設 `high`）和 `trivy_severity`（預設 `CRITICAL,HIGH`）。這些門檻會記錄在報告的 `settings` 裡，因為「門檻以上沒有發現」和「完全沒有發現」是兩回事。
 
-環境變數：設定 `SEMGREP_APP_TOKEN` 時，Semgrep 改用 `semgrep ci` 套用你組織的政策（一律完整掃描，不會只掃差異）。`QSD_SONAR_PORT`、`QSD_SCANNER_IMAGE`、`QSD_CLAMAV_IMAGE` 可覆寫預設值。Snyk 和 `gh` 使用它們自己的登入狀態。
+環境變數：設定 `SEMGREP_APP_TOKEN` 時，Semgrep 改用 `semgrep ci` 套用你組織的政策（一律完整掃描，不會只掃差異）。`QSD_SONAR_PORT`、`QSD_SCANNER_IMAGE`、`QSD_CLAMAV_IMAGE`、`QSD_GITLEAKS_IMAGE` 可覆寫預設值。Snyk 和 `gh` 使用它們自己的登入狀態。
 
 ### 2. 彙整已經有的掃描結果（CI）
 
@@ -116,13 +120,14 @@ SonarQube 可以從匯出的 API 回應（`issues`、`hotspots`、`measures`）�
 }
 ```
 
-各工具的嚴重度統一對應到同一個等級（`rank` 0 = CRITICAL/BLOCKER … 4 = INFO）。`security` 依問題的性質判斷（相依套件、container、IaC、設定錯誤、漏洞、hotspot、惡意程式、套件風險），不看是哪個工具回報的。`id` 是內容雜湊，在同一份報告中不會重複；訊息、位置或行號改變時它也會跟著改變。
+各工具的嚴重度統一對應到同一個等級（`rank` 0 = CRITICAL/BLOCKER … 4 = INFO）。`security` 依問題的性質判斷（相依套件、container、IaC、設定錯誤、漏洞、hotspot、機密、惡意程式、套件風險），不看是哪個工具回報的。`id` 是內容雜湊，在同一份報告中不會重複；訊息、位置或行號改變時它也會跟著改變。
 
 ## 安全注意事項
 
 - 原始輸出、紀錄和產生的報告，可能含有被掃描 repository 的程式碼與機密，請不要當成公開的 CI artifact 上傳。
 - 一次性 SonarQube 只綁定在 `127.0.0.1` 的隨機 port 上，只用官方文件寫明的首次開機 `admin` 帳號產生 token，接著立刻更換該密碼。每次執行都使用自己的 compose project，結束時連同 volume 一起刪除。
-- scanner 與 ClamAV 映像檔以 digest 固定版本；GitHub Actions 以 commit SHA 固定版本。
+- scanner、ClamAV 與 Gitleaks 映像檔以 digest 固定版本；GitHub Actions 以 commit SHA 固定版本。
+- Gitleaks 使用免費的 MIT CLI，不需要授權金鑰（只有 `gitleaks-action` 在組織 repository 上才需要）。它一律以 `--redact` 執行，`qsd` 只保留規則、檔案、行號與 commit：絕不保留機密本身，也不保留 commit 作者、email 或訊息。你 repository 裡的 `.gitleaks.toml` 與 `.gitleaksignore` 會照常生效。在歷史中找到的機密必須撤銷；只從程式碼刪掉並不能挽回外洩。
 - 在 Linux 上，SonarQube 需要主機的 `vm.max_map_count >= 524288`。
 - GuardDog 會從套件庫下載每個相依套件來分析（不會安裝或執行）。`capability-*` 規則只代表套件*能*做什麼，標為 LOW；`threat-*` 規則標為 HIGH。
 - 如果發現本工具的漏洞，請私下回報，見 [SECURITY.md](SECURITY.md)。

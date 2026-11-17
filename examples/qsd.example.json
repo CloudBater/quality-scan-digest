@@ -40,7 +40,8 @@
           "ecosystem": "npm",
           "manifest": "package.json"
         }
-      ]
+      ],
+      "gitleaks_log_opts": "--all"
     }
   ]
 }

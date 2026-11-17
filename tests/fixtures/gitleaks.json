@@ -1,0 +1,18 @@
+[
+ {
+  "RuleID": "github-pat",
+  "Description": "GitHub Personal Access Token",
+  "StartLine": 3,
+  "EndLine": 3,
+  "Match": "REDACTED",
+  "Secret": "REDACTED",
+  "File": "app/settings.py",
+  "Commit": "0123456789abcdef0123",
+  "Author": "Jane Doe",
+  "Email": "jane@example.com",
+  "Message": "oops",
+  "Date": "2026-01-01T00:00:00Z",
+  "Tags": [],
+  "Fingerprint": "0123:app/settings.py:github-pat:3"
+ }
+]

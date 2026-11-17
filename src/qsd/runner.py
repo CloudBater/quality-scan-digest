@@ -26,7 +26,7 @@ from importlib import resources
 from .model import safe_name
 from .parsers.sonarqube import MEASURE_KEYS, Forbidden, SonarError, api, fetch_all
 
-TOOLS = ("sonarqube", "snyk", "trivy", "semgrep", "dependabot", "clamav", "guarddog")
+TOOLS = ("sonarqube", "snyk", "trivy", "semgrep", "dependabot", "clamav", "guarddog", "gitleaks")
 
 # Pinned by digest: a moving tag changes the code that runs with your token.
 SCANNER_IMAGE = os.environ.get(
@@ -37,6 +37,10 @@ CLAMAV_IMAGE = os.environ.get(
     "clamav/clamav@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d")
 
 GUARDDOG_ECOSYSTEMS = ("pypi", "npm", "go", "github_action")
+
+GITLEAKS_IMAGE = os.environ.get(
+    "QSD_GITLEAKS_IMAGE",  # v8.24.3
+    "zricethezav/gitleaks@sha256:e1b35e12a8c6fa8901f060459cfb6b2fc4c484d3afbe3b029733a3bbfab07055")
 
 # A `semgrep ci` inside a pull_request job would otherwise scan only the diff.
 _DIFF_AWARE_ENV = ("GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_BASE_REF",
@@ -447,6 +451,10 @@ def _scan_project(pr, raw, logs, tools, settings):
         out["clamav"] = f"{stem}-clamav.txt"
         _clamav(path, out["clamav"], lg("clamav"), notes)
 
+    if "gitleaks" in tools:
+        out["gitleaks"] = f"{stem}-gitleaks.json"
+        _gitleaks(cfg, path, out["gitleaks"], lg("gitleaks"), notes)
+
     if "guarddog" in tools and cfg.get("guarddog"):
         out["guarddog"] = {}
         for i, g in enumerate(cfg["guarddog"]):
@@ -537,4 +545,45 @@ def _guarddog(g, path, out, logfile, notes, source):
                              "--output-format", "json"], stdout=fh, stderr=err).returncode
     if rc != 0 or not _nonempty(out):
         notes[source] = f"guarddog exited {rc}, see logs"
+        _rm(out)
+
+
+def _gitleaks(cfg, path, out, logfile, notes):
+    """Full git history when the checkout is a repository, the files otherwise.
+
+    The free MIT CLI needs no licence key (only gitleaks-action does, for
+    organisation repos). --redact keeps secrets out of the report, and
+    --exit-code 0 makes any nonzero exit a real failure rather than "found".
+    The repo's own .gitleaks.toml / .gitleaksignore apply as usual.
+    """
+    git = os.path.isdir(os.path.join(path, ".git")) or os.path.isfile(os.path.join(path, ".git"))
+    mode = cfg.get("gitleaks_mode") or ("git" if git else "dir")
+    if mode not in ("git", "dir"):
+        notes["Gitleaks"] = f"unsupported gitleaks_mode {mode!r}"
+        return
+    args = ["--redact", "--exit-code", "0", "--report-format", "json",
+            "--no-banner", "--log-level", "error"]
+    if mode == "git" and cfg.get("gitleaks_log_opts"):
+        args.append(f"--log-opts={cfg['gitleaks_log_opts']}")
+    if have("gitleaks"):
+        cmd, target = ["gitleaks", mode, path, "--report-path", out, *args], None
+        log(f"Gitleaks: {mode} (native)")
+    elif have("docker"):
+        # The report goes to stdout so the container never writes to the host.
+        cmd = ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
+               "-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=safe.directory",
+               "-e", "GIT_CONFIG_VALUE_0=*", "-v", f"{path}:/repo:ro", GITLEAKS_IMAGE,
+               mode, "/repo", "--report-path", "/dev/stdout", *args]
+        target = out
+        log(f"Gitleaks: {mode} (container)")
+    else:
+        notes["Gitleaks"] = "neither gitleaks nor docker available"
+        return
+    if target:
+        with open(target, "w") as fh, open(logfile, "w") as err:
+            rc = subprocess.run(cmd, stdout=fh, stderr=err).returncode
+    else:
+        rc = run(cmd, logfile)
+    if rc != 0 or not _nonempty(out):
+        notes["Gitleaks"] = f"gitleaks exited {rc}, see logs"
         _rm(out)

@@ -10,7 +10,7 @@ RANK = {"CRITICAL": 0, "BLOCKER": 0, "HIGH": 1, "MAJOR": 2, "MEDIUM": 2,
 # Classified by what a finding is, not by which scanner reported it, so a merge
 # that changes the primary scanner cannot change whether a row counts as security.
 SECURITY_KINDS = {"Vulnerability", "Security Hotspot", "Dependency", "Container", "IaC",
-                  "Misconfiguration", "Malware", "Malicious Package", "Package Risk"}
+                  "Misconfiguration", "Malware", "Malicious Package", "Package Risk", "Secret"}
 
 _CWE = re.compile(r"CWE-?(\d+)", re.IGNORECASE)
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")

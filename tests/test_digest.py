@@ -13,7 +13,7 @@ from qsd.cli import _resolve  # noqa: E402
 from qsd.dedup import dedup  # noqa: E402
 from qsd.html_report import render  # noqa: E402
 from qsd.model import finding  # noqa: E402
-from qsd.parsers import clamav, dependabot, guarddog, semgrep, snyk, sonarqube, trivy  # noqa: E402
+from qsd.parsers import clamav, dependabot, gitleaks, guarddog, semgrep, snyk, sonarqube, trivy  # noqa: E402
 from qsd.report import ManifestError, build_payload  # noqa: E402
 
 
@@ -128,6 +128,22 @@ class Parsers(unittest.TestCase):
         self.assertFalse(guarddog.load(tmpjson({"x": 1}), "A")[1]["ok"])
         del by
 
+    def test_gitleaks_drops_secret_and_personal_data(self):
+        with open(fx("gitleaks.json")) as fh:
+            doc = json.load(fh)
+        # Built at runtime so no token-shaped string is committed to this repo.
+        fake = "ghp_" + "FAKE" * 9
+        doc[0].update(Secret=fake, Match=f"token = '{fake}'")
+        rows, st = gitleaks.load(tmpjson(doc), "API")
+        r = rows[0]
+        self.assertEqual((r["ref"], r["loc"], r["line"], r["kind"], r["sev"], r["security"]),
+                         ("github-pat", "app/settings.py", 3, "Secret", "HIGH", True))
+        blob = json.dumps(rows)
+        for leaked in ("ghp_FAKE", "jane@example.com", "Jane Doe", "oops"):
+            self.assertNotIn(leaked, blob)
+        self.assertEqual(gitleaks.load(tmpjson([]), "A")[1], {"ok": True, "note": ""})
+        self.assertFalse(gitleaks.load(tmpjson({"error": "x"}), "A")[1]["ok"])
+
     def test_unreadable_file_is_a_note_not_a_crash(self):
         rows, st = snyk.load(fx("does-not-exist.json"), "Code", "API")
         self.assertEqual((rows, st["ok"]), ([], False))
@@ -190,9 +206,9 @@ class EndToEnd(unittest.TestCase):
         self.p = build_payload(load_manifest())
 
     def test_counts(self):
-        # 15 raw rows + ClamAV 1 + GuardDog 3; 1 exact duplicate; 3 advisory merges.
-        self.assertEqual(self.p["dedup"], {"input": 19, "passes": ["exact", "advisory"],
-                                           "exact": 1, "advisory": 3, "output": 15})
+        # 15 raw rows + ClamAV 1 + GuardDog 3 + Gitleaks 1; 1 exact duplicate; 3 advisory merges.
+        self.assertEqual(self.p["dedup"], {"input": 20, "passes": ["exact", "advisory"],
+                                           "exact": 1, "advisory": 3, "output": 16})
 
     def test_four_sightings_one_row_most_severe_wins(self):
         dj = [r for r in self.p["findings"] if "CVE-2099-0001" in r["ids"]]
@@ -211,7 +227,8 @@ class EndToEnd(unittest.TestCase):
         self.assertFalse(s["API: Snyk Container"]["collected"])
         self.assertTrue(s["API: SonarQube"]["collected"])
         self.assertTrue(s["API: ClamAV"]["complete"])
-        self.assertEqual(sum(v["collected"] for v in s.values()), 10)
+        self.assertEqual(sum(v["collected"] for v in s.values()), 11)
+        self.assertNotIn("ghp_FAKE", json.dumps(self.p))
 
     def test_backward_compatible_shape(self):
         for k in ("title", "version", "generated_from", "sources", "findings"):
@@ -226,7 +243,7 @@ class EndToEnd(unittest.TestCase):
     def test_ids_unique_even_without_dedup(self):
         p = build_payload(load_manifest(), passes=())
         ids = [r["id"] for r in p["findings"]]
-        self.assertEqual((len(ids), len(set(ids))), (19, 19))
+        self.assertEqual((len(ids), len(set(ids))), (20, 20))
 
     def test_rows_sorted_by_severity(self):
         ranks = [r["rank"] for r in self.p["findings"]]
@@ -290,7 +307,7 @@ class Cli(unittest.TestCase):
             with open(out) as fh:
                 p = json.load(fh)
             self.assertEqual((p["version"], len(p["findings"]), p["settings"]["dedup"]),
-                             ("v9", 15, "exact,advisory"))
+                             ("v9", 16, "exact,advisory"))
             r = self.run_cli("digest", fx("manifest.json"), "--json-out", out, "--strict")
             self.assertEqual(r.returncode, 2)
 
