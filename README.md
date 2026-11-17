@@ -1,5 +1,7 @@
 # quality-scan-digest
 
+English | [繁體中文](README.zh-TW.md)
+
 Run seven code, supply-chain and malware scanners against your repositories, merge what
 they report into **one deduplicated list**, and export it as **JSON** (plus an optional
 self-contained HTML report).
