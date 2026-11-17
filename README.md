@@ -14,7 +14,7 @@ self-contained HTML report).
 
 Test coverage (Cobertura XML or an Istanbul `coverage-summary.json`) can ride along.
 
-Python 3.9+, standard library only. No server: SonarQube runs as a throwaway
+Python 3.10+, standard library only. No server: SonarQube runs as a throwaway
 container that is started, scanned against, exported and destroyed in one run.
 
 ## Why
