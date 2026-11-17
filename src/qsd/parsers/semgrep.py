@@ -1,7 +1,7 @@
 """Semgrep: Code (SAST) and Supply Chain results from `semgrep ... --json`."""
 
 from ..model import finding
-from . import read_json, unreadable
+from . import failed, read_json, status, unreadable
 
 # Semgrep severity is rule-level, not risk-level: a low-confidence audit rule
 # can carry impact HIGH. Rank by `severity` so crit+high counts what Semgrep
@@ -10,12 +10,13 @@ SEV = {"ERROR": "HIGH", "WARNING": "MEDIUM", "INFO": "LOW",
        "CRITICAL": "CRITICAL", "HIGH": "HIGH", "MEDIUM": "MEDIUM", "LOW": "LOW"}
 
 
-def load(path, label):
-    """Returns (rows, note)."""
+def load(path, label, project_id=None):
     try:
         doc = read_json(path)
     except (OSError, ValueError) as exc:
-        return [], unreadable(path, exc)
+        return unreadable(path, exc)
+    if not isinstance(doc, dict) or "results" not in doc:
+        return failed("not recognisable Semgrep JSON output")
 
     rows = []
     for r in doc.get("results") or []:
@@ -26,7 +27,7 @@ def load(path, label):
         supply_chain = bool(sca) or str(r.get("check_id", "")).startswith("ssc-")
         security = supply_chain or meta.get("category") == "security"
         rows.append(finding(
-            proj=label, src="Semgrep",
+            project_id=project_id, proj=label, src="Semgrep",
             kind=("Dependency" if supply_chain
                   else "Vulnerability" if security else "Code Smell"),
             sev=SEV.get(str(extra.get("severity", "")).upper(), "—"),
@@ -35,15 +36,20 @@ def load(path, label):
             line=(r.get("start") or {}).get("line"),
             ref=r.get("check_id", ""),
             fix=meta.get("shortlink") or "",
-            ids=list(_as_list(meta.get("cve"))) + list(_as_list(meta.get("ghsa"))),
+            ids=_as_list(meta.get("cve")) + _as_list(meta.get("ghsa")),
             cwe=meta.get("cwe"),
-            package=dep.get("package", ""),
+            package=dep.get("package", ""), ecosystem=dep.get("ecosystem", ""),
         ))
 
-    # `errors` are scan failures, not findings: an empty list with errors is incomplete.
+    # Errors and results are independent: findings from some files do not make
+    # up for files that failed to scan. `warn` (a file only partly parsed) is
+    # recorded but does not make the source incomplete; anything else does.
     errs = doc.get("errors") or []
-    note = f"{len(errs)} scan error(s)" if errs and not rows else ""
-    return rows, note
+    hard = [e for e in errs if str(e.get("level", "error")).lower() != "warn"]
+    warns = len(errs) - len(hard)
+    notes = ([f"incomplete: {len(hard)} scan error(s)"] if hard else []) + \
+        ([f"{warns} file(s) only partly parsed"] if warns else [])
+    return rows, status(note="; ".join(notes), complete=not hard)
 
 
 def _as_list(v):

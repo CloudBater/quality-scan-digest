@@ -2,6 +2,7 @@
 
 import html
 import json
+import re
 
 TEMPLATE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -21,7 +22,7 @@ h1{font-size:1.3rem;margin:0 0 .2rem}h2{font-size:.95rem;margin:1.5rem 0 .6rem;c
 .tile.bad b{color:var(--bad)}.tile.ok b{color:var(--ok)}
 .srcs{display:flex;flex-wrap:wrap;gap:.4rem;margin:.9rem 0 0}
 .chip{font-size:.75rem;padding:.2rem .55rem;border-radius:999px;border:1px solid var(--line);background:var(--card)}
-.chip.on{border-color:var(--ok);color:var(--ok)}.chip.off{background:var(--warnbg);color:var(--warnfg);border-color:transparent;font-weight:600}
+.chip.on{border-color:var(--ok);color:var(--ok)}.chip.part{border-color:var(--warnfg);color:var(--warnfg)}.chip.off{background:var(--warnbg);color:var(--warnfg);border-color:transparent;font-weight:600}
 .controls{display:flex;flex-wrap:wrap;gap:.5rem;margin:.9rem 0}
 input,select{background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:.45rem .6rem;font:inherit}
 input{flex:1 1 260px}
@@ -58,7 +59,7 @@ footer{margin-top:1.5rem;color:var(--mut);font-size:.78rem;border-top:1px solid 
 <tbody id="rows"></tbody></table></div>
 <div class="empty" id="empty" hidden>No findings match this filter.</div>
 <footer>Sources marked “not collected” were unavailable at build time; their absence is not a clean result.
-A row seen by several scanners is listed once.</footer>
+A row seen by several scanners is listed once; its other sightings are listed under it.</footer>
 <script>
 const DATA = __DATA__;
 const $ = i => document.getElementById(i);
@@ -78,7 +79,7 @@ function render(){
     <td class="sev ${esc(r.sev)}">${esc(r.sev)}</td>
     <td><span class="tag">${esc(r.proj)}</span></td>
     <td>${r.by.map(s=>`<span class="tag">${esc(s)}</span>`).join("")}</td><td>${esc(r.kind)}</td>
-    <td>${esc(r.msg)}<br><code>${esc([r.ref,...(r.ids||[])].filter((v,i,a)=>v&&a.indexOf(v)===i).join(" · "))}</code></td>
+    <td>${esc(r.msg)}<br><code>${esc([r.ref,...(r.ids||[])].filter((v,i,a)=>v&&a.indexOf(v)===i).join(" · "))}</code>${(r.also||[]).length?`<details><summary>${r.also.length} more sighting(s)</summary>${r.also.map(a=>`<div><span class="tag">${esc(a.src)}</span> <span class="sev ${esc(a.sev)}">${esc(a.sev)}</span> ${esc(a.msg)} <code>${esc(a.ref)} ${esc(a.loc)}${a.line?":"+esc(a.line):""}</code></div>`).join("")}</details>`:""}</td>
     <td><code>${esc(r.loc)}</code>${r.line?` <code>:${esc(r.line)}</code>`:""}</td>
     <td>${esc(r.fix)}</td></tr>`).join("");
   $("count").textContent=`${rows.length} of ${DATA.length} findings`;
@@ -91,65 +92,91 @@ render();
 """
 
 
+_PLACEHOLDER = re.compile(r"__([A-Z_]+)__")
+
+
+def _script_json(value):
+    """JSON safe inside <script>: no <, > or & can open a tag, comment or entity."""
+    return (json.dumps(value, ensure_ascii=False)
+            .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+            .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+
+
 def _tile(label, value, cls=""):
     v = "—" if value is None else value
     return f'<div class="tile {cls}"><b>{html.escape(str(v))}</b><span>{html.escape(label)}</span></div>'
 
 
-def _sum(summaries, get):
-    vals = []
-    for s in summaries:
-        v = get(s)
-        try:
-            if v not in (None, "", "—"):
-                vals.append(float(v))
-        except (TypeError, ValueError):
-            pass
+def _num(v):
+    try:
+        return float(v) if v not in (None, "", "—") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _sum(values):
+    vals = [v for v in (_num(x) for x in values) if v is not None]
     return int(sum(vals)) if vals else None
 
 
 def render(payload):
     rows, summaries, sources = payload["findings"], payload["generated_from"], payload["sources"]
     crit_high = sum(s["sec_crit_high"] for s in summaries)
-    sonar = lambda k: _sum(summaries, lambda s: (s.get("sonar") or {}).get(k))  # noqa: E731
-    dbot = _sum(summaries, lambda s: (s.get("dependabot") or {}).get("unique"))
+    sonar = lambda k: _sum((s.get("sonar") or {}).get(k) for s in summaries)  # noqa: E731
+    dbot = _sum((s.get("dependabot") or {}).get("unique") for s in summaries)
     ncloc = sonar("ncloc")
     covs = [s["coverage"] for s in summaries if s.get("coverage")]
     measured = sum(c["measured"] for c in covs) if covs else None
     covered = sum(c["covered"] for c in covs) if covs else None
+    # Only projects that have both numbers share a denominator.
+    paired = [(s["coverage"]["measured"], _num((s.get("sonar") or {}).get("ncloc")))
+              for s in summaries if s.get("coverage") and _num((s.get("sonar") or {}).get("ncloc"))]
     stats = payload.get("dedup") or {}
 
     sec = "".join([
         _tile("Security crit + high", crit_high, "bad" if crit_high else "ok"),
         _tile("Security findings", sum(s["security"] for s in summaries)),
+        _tile("Malware", sum(1 for r in rows if r["kind"] == "Malware"),
+              "bad" if any(r["kind"] == "Malware" for r in rows) else ""),
         _tile("Dependabot advisories", dbot, "bad" if dbot else ""),
-        _tile("Sonar vulnerabilities", sonar("vulnerabilities")),
         _tile("Security hotspots", sonar("security_hotspots")),
-        _tile("Duplicates merged", (stats.get("input", 0) - stats.get("output", 0)) or 0),
+        _tile("Duplicates merged", stats.get("input", 0) - stats.get("output", 0)),
     ])
     qual = "".join([
         _tile("Bugs", sonar("bugs")),
         _tile("Code smells", sonar("code_smells")),
         # Two tiles, never one: a pooled percentage hides how little is measured.
         _tile("Coverage of measured", round(covered / measured * 100, 1) if measured else None),
-        _tile("Codebase measured %", round(measured / ncloc * 100, 1) if measured and ncloc else None),
+        _tile("Codebase measured %", round(sum(m for m, _ in paired) / sum(n for _, n in paired)
+                                           * 100, 1) if paired else None),
         _tile("Lines of code", f"{ncloc:,}" if ncloc else None),
-        _tile("Deps scanned", _sum(summaries, lambda s: s.get("deps"))),
+        _tile("Deps scanned", _sum(s.get("deps") for s in summaries)),
     ])
-    chips = "".join(
-        f'<span class="chip {"on" if v["collected"] else "off"}">'
-        f'{"✓" if v["collected"] else "✗ not collected —"} {html.escape(name)}'
-        f'{"" if v["collected"] else " " + html.escape(v["note"])}</span>'
-        for name, v in sources.items())
+
+    def chip(name, v):
+        if not v["collected"]:
+            return (f'<span class="chip off">✗ not collected — {html.escape(name)} '
+                    f'{html.escape(v["note"])}</span>')
+        if not v.get("complete", True):
+            return f'<span class="chip part">◐ {html.escape(name)} — {html.escape(v["note"])}</span>'
+        return f'<span class="chip on">✓ {html.escape(name)}</span>'
+
+    chips = "".join(chip(n, v) for n, v in sources.items())
     collected = sum(1 for v in sources.values() if v["collected"])
+    settings = payload.get("settings") or {}
+    floors = ", ".join(f"{k}: {v}" for k, v in settings.items())
     subtitle = (f"{html.escape(payload.get('version') or '')} · <b>{len(rows)}</b> findings "
                 f"after merging {stats.get('input', len(rows))} sightings · "
-                f"{collected} of {len(sources)} sources collected")
-    return (TEMPLATE
-            .replace("__TITLE__", html.escape(payload["title"]))
-            .replace("__SUBTITLE__", subtitle)
-            .replace("__SEC_TILES__", sec)
-            .replace("__QUAL_TILES__", qual)
-            .replace("__CHIPS__", chips)
-            # </script> inside a message must not end the script block.
-            .replace("__DATA__", json.dumps(rows, ensure_ascii=False).replace("</", "<\\/")))
+                f"{collected} of {len(sources)} sources collected"
+                + (f" · {html.escape(floors)}" if floors else ""))
+    parts = {
+        "TITLE": html.escape(payload["title"]),
+        "SUBTITLE": subtitle,
+        "SEC_TILES": sec,
+        "QUAL_TILES": qual,
+        "CHIPS": chips,
+        "DATA": _script_json(rows),
+    }
+    # One pass over the template: an inserted value is never searched again, so
+    # a title containing a placeholder name cannot pull raw data into the page.
+    return _PLACEHOLDER.sub(lambda m: parts.get(m.group(1), m.group(0)), TEMPLATE)

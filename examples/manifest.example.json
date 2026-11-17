@@ -1,5 +1,5 @@
 {
-  "title": "Example App — Quality & Security",
+  "title": "Example App \u2014 Quality & Security",
   "version": "v1.4.0",
   "projects": [
     {
@@ -24,7 +24,19 @@
       },
       "semgrep": "raw/api-semgrep.json",
       "dependabot": "raw/api-dependabot.json",
-      "coverage": "raw/coverage.xml"
+      "coverage": "raw/coverage.xml",
+      "clamav": "raw/api-clamav.txt",
+      "guarddog": {
+        "requirements.txt": {
+          "path": "raw/api-guarddog-0.json",
+          "ecosystem": "pypi",
+          "manifest": "requirements.txt"
+        }
+      }
     }
-  ]
+  ],
+  "settings": {
+    "snyk_severity": "high",
+    "trivy_severity": "CRITICAL,HIGH"
+  }
 }

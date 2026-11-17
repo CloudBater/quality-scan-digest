@@ -1,7 +1,11 @@
-"""One parser per tool. Each returns rows built by qsd.model.finding plus a note.
+"""One parser per tool.
 
-A note is empty when the source was read cleanly, and otherwise says why it is
-incomplete, so the report can mark it rather than show a short, reassuring list.
+Every parser returns (rows, status). status is a dict:
+  ok        the file was this tool's output and was read; False = not collected
+  note      why the source is not collected, or why it is incomplete
+  ...       optional extras (dependency count, alert counts)
+A source with ok=True and a note is collected but incomplete. Nothing that is
+not recognisably the tool's output is ever read as an empty, clean result.
 """
 
 import json
@@ -32,5 +36,13 @@ def read_json(path):
         return docs
 
 
+def status(ok=True, note="", **extra):
+    return {"ok": ok, "note": note, **extra}
+
+
+def failed(note):
+    return [], status(False, note)
+
+
 def unreadable(path, exc):
-    return f"{os.path.basename(path)}: unreadable ({exc.__class__.__name__})"
+    return failed(f"{os.path.basename(path)}: unreadable ({exc.__class__.__name__})")

@@ -8,10 +8,12 @@ import datetime as _dt
 import os
 
 from . import __version__
-from .dedup import dedup
-from .model import fingerprint, is_security, rank
+from .dedup import DEFAULT_PASSES, dedup
+from .model import fingerprint, is_security, rank, safe_name
+from .parsers import clamav as p_clamav
 from .parsers import coverage as p_coverage
 from .parsers import dependabot as p_dependabot
+from .parsers import guarddog as p_guarddog
 from .parsers import semgrep as p_semgrep
 from .parsers import snyk as p_snyk
 from .parsers import sonarqube as p_sonar
@@ -20,151 +22,189 @@ from .parsers import trivy as p_trivy
 SCHEMA_VERSION = "1.0"
 
 
+class ManifestError(ValueError):
+    pass
+
+
+def _s(v):
+    return "" if v is None else str(v)
+
+
+def validate(manifest):
+    """Normalise a manifest in place and return its project list."""
+    if isinstance(manifest, list):
+        manifest = {"projects": manifest}
+    projects = manifest.get("projects")
+    if not isinstance(projects, list) or not projects:
+        raise ManifestError("manifest needs a non-empty `projects` list")
+    names, labels = set(), set()
+    for p in projects:
+        if not isinstance(p, dict):
+            raise ManifestError("each project must be an object")
+        name = _s(p.get("name") or p.get("project"))
+        if not safe_name(name):
+            raise ManifestError(f"project name {name!r} must match [A-Za-z0-9][A-Za-z0-9._-]*")
+        label = _s(p.get("label")) or name
+        if name in names or label in labels:
+            raise ManifestError(f"duplicate project name or label: {name!r} / {label!r}")
+        names.add(name)
+        labels.add(label)
+        p["name"], p["label"] = name, label
+        for k in ("repo", "commit"):
+            p[k] = _s(p.get(k))
+    manifest["title"] = _s(manifest.get("title"))
+    manifest["version"] = _s(manifest.get("version"))
+    return manifest
+
+
 def _exists(path):
-    return bool(path) and os.path.exists(path)
+    return bool(path) and os.path.isfile(path)
 
 
 def collect_project(cfg, sonar_token=""):
     """Gather one project's sources. Returns (rows, summary, sources).
 
-    A source listed in the manifest but missing on disk is reported as not
-    collected, never silently dropped: its absence is not a clean result.
+    A source listed in the manifest is always reported: collected, collected but
+    incomplete, or not collected with the reason. Its absence is never a clean result.
     """
-    label = cfg.get("label") or cfg.get("name") or cfg.get("project") or "project"
-    rows, sources, measures, deps = [], {}, {}, None
+    pid, label = cfg["name"], cfg["label"]
+    run_notes = cfg.get("notes") or {}
+    rows, sources, measures, deps, dbot = [], {}, {}, None, None
+
+    def record(source, st):
+        sources[f"{label}: {source}"] = {"collected": bool(st["ok"]),
+                                         "complete": bool(st["ok"]) and st.get(
+                                             "complete", not st["note"]),
+                                         "note": st["note"]}
+
+    def missing(source, default="not scanned"):
+        record(source, {"ok": False, "note": run_notes.get(source, default)})
+
+    def file_source(source, path, parse):
+        nonlocal rows
+        if not _exists(path):
+            missing(source)
+            return None
+        r, st = parse(path)
+        rows += r
+        record(source, st)
+        return st
 
     sq = cfg.get("sonarqube")
     if sq is not None:
-        name = f"{label}: SonarQube"
         try:
             if sq.get("host"):
-                token = sq.get("token") or sonar_token
-                if not token:
+                if not sonar_token:
                     raise p_sonar.SonarError("no token (set SONAR_TOKEN)")
-                issues, hotspots, raw, note = p_sonar.fetch(
-                    sq["host"], token, sq.get("project_key") or cfg.get("name") or label)
-            elif sq.get("issues") or sq.get("measures"):
-                issues, hotspots, raw = p_sonar.load_files(sq)
-                note = ""
+                doc = p_sonar.fetch(sq["host"], sonar_token, sq.get("project_key") or pid)
+            elif sq.get("issues"):
+                doc = p_sonar.load_files(sq)
             else:
-                raise p_sonar.SonarError("not scanned")
-            r, measures = p_sonar.to_rows(issues, hotspots, raw, label)
+                raise p_sonar.SonarError(run_notes.get("SonarQube", "not scanned"))
+            r, st, measures = p_sonar.to_rows(doc, label, pid)
             rows += r
-            sources[name] = (not note, note)
+            record("SonarQube", st)
         except (p_sonar.SonarError, OSError, ValueError) as exc:
-            sources[name] = (False, str(exc) or exc.__class__.__name__)
+            record("SonarQube", {"ok": False, "note": str(exc) or exc.__class__.__name__})
 
     snyk = cfg.get("snyk")
     if snyk is not None:
         for product in p_snyk.PRODUCTS:
-            if product not in snyk:
-                continue
-            name, path = f"{label}: Snyk {product}", snyk[product]
-            if not _exists(path):
-                sources[name] = (False, "not scanned")
-                continue
-            r, d, note = p_snyk.load(path, product, label)
-            rows += r
-            if d is not None:
-                deps = (deps or 0) + d
-            sources[name] = (not note, note)
+            if product in snyk:
+                st = file_source(f"Snyk {product}", snyk[product],
+                                 lambda p, pr=product: p_snyk.load(p, pr, label, pid))
+                if st and st.get("deps") is not None:
+                    deps = (deps or 0) + st["deps"]
 
     # Named scans: a repo has both a Dockerfile and a chart, and a chart that
     # fails to render must not hide a Dockerfile that scanned fine.
     for scan, path in (cfg.get("trivy") or {}).items():
-        name = f"{label}: Trivy {scan}"
-        if not _exists(path):
-            sources[name] = (False, "not scanned")
-            continue
-        r, note = p_trivy.load(path, label)
-        rows += r
-        sources[name] = (not note, note)
+        file_source(f"Trivy {scan}", path, lambda p: p_trivy.load(p, label, pid))
 
     if "semgrep" in cfg:
-        name, path = f"{label}: Semgrep", cfg["semgrep"]
-        if not _exists(path):
-            sources[name] = (False, "not scanned")
-        else:
-            r, note = p_semgrep.load(path, label)
-            rows += r
-            sources[name] = (not note, note)
+        file_source("Semgrep", cfg["semgrep"], lambda p: p_semgrep.load(p, label, pid))
 
-    dbot = None
     if "dependabot" in cfg:
-        name, path = f"{label}: Dependabot", cfg["dependabot"]
-        if not _exists(path):
-            sources[name] = (False, "not collected")
-        else:
-            r, dbot, note = p_dependabot.load(path, label)
-            rows += r
-            sources[name] = (dbot is not None, note)
+        st = file_source("Dependabot", cfg["dependabot"],
+                         lambda p: p_dependabot.load(p, label, pid))
+        dbot = st.get("counts") if st else None
+
+    if "clamav" in cfg:
+        file_source("ClamAV", cfg["clamav"], lambda p: p_clamav.load(p, label, pid))
+
+    for scan, g in (cfg.get("guarddog") or {}).items():
+        g = g if isinstance(g, dict) else {"path": g}
+        file_source(f"GuardDog {scan}", g.get("path"), lambda p, g=g: p_guarddog.load(
+            p, label, pid, g.get("ecosystem", ""), g.get("manifest", scan)))
 
     cov = None
     if "coverage" in cfg:
-        name = f"{label}: Coverage"
         if not _exists(cfg["coverage"]):
-            sources[name] = (False, "not supplied")
+            missing("Coverage", "not supplied")
         else:
             cov, note = p_coverage.load(cfg["coverage"])
-            sources[name] = (cov is not None, note)
+            record("Coverage", {"ok": cov is not None, "note": note})
 
-    summary = {"project": label, "repo": cfg.get("repo", ""), "commit": cfg.get("commit", ""),
+    summary = {"project_id": pid, "project": label, "repo": cfg["repo"], "commit": cfg["commit"],
                "sonar": measures, "coverage": cov, "dependabot": dbot, "deps": deps}
     return rows, summary, sources
 
 
-def build_payload(manifest, sonar_token="", passes=("exact", "advisory", "sast")):
+def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES):
     """Manifest dict -> payload dict."""
-    projects = manifest["projects"] if isinstance(manifest, dict) else manifest
-    meta = manifest if isinstance(manifest, dict) else {}
-
+    manifest = validate(manifest)
     raw, summaries, sources = [], [], {}
-    for cfg in projects:
+    for cfg in manifest["projects"]:
         r, s, src = collect_project(cfg, sonar_token)
         raw += r
         summaries.append(s)
         sources.update(src)
 
     rows, stats = dedup(raw, passes or ())
+    seen = {}
     for r in rows:
         r.pop("_package", None)
-        r["id"] = fingerprint(r)
+        r.pop("_eco", None)
         r["rank"] = rank(r["sev"])
+        fid = fingerprint(r)
+        n = seen.get(fid, 0)
+        seen[fid] = n + 1
+        # Identical content twice (exact pass off) still gets two distinct ids.
+        r["id"] = fid if n == 0 else f"{fid}-{n + 1}"
     rows.sort(key=lambda r: (r["rank"], r["proj"], r["src"], r["loc"], str(r["line"])))
 
     for s in summaries:
-        mine = [r for r in rows if r["proj"] == s["project"]]
+        mine = [r for r in rows if r["project_id"] == s["project_id"]]
         sec = [r for r in mine if is_security(r)]
+        by_source = {}
+        for r in mine:
+            for src in r["by"]:
+                by_source[src] = by_source.get(src, 0) + 1
         s.update({
             "findings": len(mine),
             "security": len(sec),
             "sec_crit_high": sum(1 for r in sec if r["rank"] <= 1),
             # Sightings per scanner: a merged row counts under each, so these do not sum.
-            "by_source": _sightings(mine),
+            "by_source": by_source,
             # Kept for consumers of the original payload shape.
-            "snyk": sum(1 for r in mine if "Snyk" in r["by"]),
-            "semgrep": sum(1 for r in mine if "Semgrep" in r["by"]),
-            "trivy": sum(1 for r in mine if "Trivy" in r["by"]),
+            "snyk": by_source.get("Snyk", 0),
+            "semgrep": by_source.get("Semgrep", 0),
+            "trivy": by_source.get("Trivy", 0),
         })
 
-    title = meta.get("title") or (f"{summaries[0]['project']} — Quality & Security"
+    title = manifest["title"] or (f"{summaries[0]['project']} — Quality & Security"
                                   if len(summaries) == 1 else "Quality & Security")
     return {
         "schema_version": SCHEMA_VERSION,
         "generator": {"name": "quality-scan-digest", "version": __version__},
         "generated_at": _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat(),
         "title": title,
-        "version": meta.get("version", ""),
+        "version": manifest["version"],
+        # Severity floors and rulesets the scanners ran with: zero findings under
+        # a `high` floor is not the same claim as zero findings.
+        "settings": manifest.get("settings") or {},
         "generated_from": summaries,
-        "sources": {k: {"collected": ok, "note": why} for k, (ok, why) in sources.items()},
+        "sources": sources,
         "dedup": stats,
         "findings": rows,
     }
-
-
-def _sightings(rows):
-    out = {}
-    for r in rows:
-        for s in r["by"]:
-            out[s] = out.get(s, 0) + 1
-    return out

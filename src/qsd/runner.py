@@ -1,27 +1,50 @@
-"""Run the five scanners against local checkouts and write a digest manifest.
+"""Run the scanners against local checkouts and write a digest manifest.
 
 Every tool is optional. One that is missing, unauthenticated or fails is
-recorded as not collected and the run continues: a release scan should say
-what it could not see rather than abort or, worse, report it as clean.
+recorded as not collected, with the reason, and the run continues: a release
+scan should say what it could not see rather than abort or report it as clean.
+
+Each run writes into a fresh, private directory, so a file left by an earlier
+run can never stand in for a scan that did not happen this time.
 """
 
 import base64
+import datetime as _dt
 import json
 import os
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from importlib import resources
 
-from .parsers.sonarqube import SonarError, api
+from .model import safe_name
+from .parsers.sonarqube import MEASURE_KEYS, Forbidden, SonarError, api, fetch_all
 
-TOOLS = ("sonarqube", "snyk", "trivy", "semgrep", "dependabot")
-SONAR_PROJECT = "qsd-sonar"
-SCANNER_IMAGE = os.environ.get("QSD_SCANNER_IMAGE", "sonarsource/sonar-scanner-cli:latest")
+TOOLS = ("sonarqube", "snyk", "trivy", "semgrep", "dependabot", "clamav", "guarddog")
+
+# Pinned by digest: a moving tag changes the code that runs with your token.
+SCANNER_IMAGE = os.environ.get(
+    "QSD_SCANNER_IMAGE",
+    "sonarsource/sonar-scanner-cli@sha256:a3f4215076706c95a17a68c19322ee916e40a3acd081a8c1a1e839e0194afa57")
+CLAMAV_IMAGE = os.environ.get(
+    "QSD_CLAMAV_IMAGE",
+    "clamav/clamav@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d")
+
+GUARDDOG_ECOSYSTEMS = ("pypi", "npm", "go", "github_action")
+
+# A `semgrep ci` inside a pull_request job would otherwise scan only the diff.
+_DIFF_AWARE_ENV = ("GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_BASE_REF",
+                   "GITHUB_HEAD_REF", "SEMGREP_BASELINE_REF", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME")
+
+
+class ConfigError(ValueError):
+    pass
 
 
 def log(msg):
@@ -49,67 +72,123 @@ def git_sha(path):
         return ""
 
 
+def _nonempty(path):
+    return os.path.isfile(path) and os.path.getsize(path) > 0
+
+
+def _rm(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _inside(base, *parts):
+    """Join and refuse anything that resolves outside `base`."""
+    root = os.path.realpath(base)
+    p = os.path.realpath(os.path.join(base, *parts))
+    if os.path.commonpath([p, root]) != root:
+        raise ConfigError(f"{os.path.join(*parts)!r} resolves outside {base}")
+    return p
+
+
+def validate(config, base):
+    projects = config.get("projects")
+    if not isinstance(projects, list) or not projects:
+        raise ConfigError("config needs a non-empty `projects` list")
+    names, labels = set(), set()
+    for p in projects:
+        name = str(p.get("name", ""))
+        if not safe_name(name):
+            raise ConfigError(f"project name {name!r} must match [A-Za-z0-9][A-Za-z0-9._-]*")
+        label = str(p.get("label") or name)
+        if name in names or label in labels:
+            raise ConfigError(f"duplicate project name or label: {name!r} / {label!r}")
+        names.add(name)
+        labels.add(label)
+        if not p.get("path") or not os.path.isdir(os.path.join(base, p["path"])):
+            raise ConfigError(f"{name}: `path` is not a directory")
+
+
 # --------------------------------------------------------------------------
 # SonarQube: a throwaway container, started, scanned against, read, destroyed.
 # --------------------------------------------------------------------------
 
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 class Sonar:
-    def __init__(self, workdir):
-        self.port = os.environ.get("QSD_SONAR_PORT", "9000")
+    def __init__(self, logs):
+        self.project = f"qsd-sonar-{secrets.token_hex(4)}"  # one deployment per run
+        self.port = os.environ.get("QSD_SONAR_PORT") or str(_free_port())
         self.host = f"http://127.0.0.1:{self.port}"
         self.token = ""
-        self.envfile = os.path.join(workdir, ".env.sonar")
+        self.secret_dir = tempfile.mkdtemp(prefix="qsd-sonar-")  # 0700
+        self.envfile = os.path.join(self.secret_dir, "env")
         self.compose = str(resources.files("qsd") / "data" / "sonarqube-compose.yml")
-        self.logs = workdir
+        self.logs = logs
 
     def _compose(self, *args):
-        return ["docker", "compose", "--env-file", self.envfile, "-p", SONAR_PROJECT,
+        return ["docker", "compose", "--env-file", self.envfile, "-p", self.project,
                 "-f", self.compose, *args]
 
+    def _post(self, path, data, user, password):
+        req = urllib.request.Request(f"{self.host}{path}",
+                                     data=urllib.parse.urlencode(data).encode(), method="POST")
+        cred = base64.b64encode(f"{user}:{password}".encode()).decode()
+        req.add_header("Authorization", f"Basic {cred}")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            body = r.read()
+            return json.loads(body) if body else {}
+
     def up(self):
-        with open(os.open(self.envfile, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "w") as fh:
-            fh.write(f"SONAR_DB_PASSWORD={secrets.token_hex(12)}\nQSD_SONAR_PORT={self.port}\n")
-        log("starting SonarQube (a cold start is ~2 minutes)")
+        fd = os.open(self.envfile, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(f"SONAR_DB_PASSWORD={secrets.token_hex(16)}\nQSD_SONAR_PORT={self.port}\n")
+        log(f"starting SonarQube as {self.project} on {self.host} (a cold start is ~2 minutes)")
         if run(self._compose("up", "-d"), os.path.join(self.logs, "sonar-up.log")) != 0:
-            raise SonarError("docker compose up failed, see sonar-up.log")
+            raise SonarError("docker compose up failed, see logs/sonar-up.log")
         for _ in range(72):
             try:
                 with urllib.request.urlopen(f"{self.host}/api/system/status", timeout=5) as r:
                     if json.load(r).get("status") == "UP":
                         break
-            except OSError:
+            except (OSError, ValueError):
                 pass
             time.sleep(5)
         else:
             raise SonarError("SonarQube never reached UP")
-        # Throwaway instance, throwaway credentials. A USER_TOKEN, because an
-        # analysis token is refused on the hotspots endpoint.
-        req = urllib.request.Request(
-            f"{self.host}/api/user_tokens/generate",
-            data=f"name=qsd-{os.getpid()}&type=USER_TOKEN".encode(), method="POST")
-        # The image's documented first-boot login; the instance dies with this run.
-        first_boot = base64.b64encode(b"admin:admin").decode()
-        req.add_header("Authorization", f"Basic {first_boot}")
-        with urllib.request.urlopen(req, timeout=30) as r:
-            self.token = json.load(r)["token"]
+        # The image's documented first-boot login mints a user token (an analysis
+        # token is refused on hotspots); then the password is rotated so no other
+        # local user can log in with the default while source is loaded.
+        self.token = self._post("/api/user_tokens/generate",
+                                {"name": f"qsd-{os.getpid()}", "type": "USER_TOKEN"},
+                                "admin", "admin")["token"]
+        self._post("/api/users/change_password",
+                   {"login": "admin", "previousPassword": "admin",
+                    "password": secrets.token_urlsafe(24) + "aA1!"}, self.token, "")
 
     def scan(self, path, key, logfile):
         log(f"SonarQube: {key}")
-        # Join the compose network instead of reaching the host: works the same
-        # on Docker Desktop and on Linux, and needs no published port.
-        cmd = ["docker", "run", "--rm", "--network", f"{SONAR_PROJECT}_default",
-               "-v", f"{path}:/usr/src", "-e", "SONAR_HOST_URL=http://sonarqube:9000",
-               "-e", f"SONAR_TOKEN={self.token}", SCANNER_IMAGE,
-               f"-Dsonar.projectKey={key}", "-Dsonar.scm.disabled=true"]
+        # Joins the compose network (no host networking), mounts the source
+        # read-only, and takes the token from the environment, not argv.
+        cmd = ["docker", "run", "--rm", "--network", f"{self.project}_default",
+               "-v", f"{path}:/usr/src:ro", "-e", "SONAR_HOST_URL=http://sonarqube:9000",
+               "-e", "SONAR_TOKEN", SCANNER_IMAGE,
+               f"-Dsonar.projectKey={key}", "-Dsonar.scm.disabled=true",
+               "-Dsonar.working.directory=/tmp/.scannerwork"]
         if not os.path.exists(os.path.join(path, "sonar-project.properties")):
             cmd.append("-Dsonar.sources=.")
-        rc = run(cmd, logfile)
+        rc = run(cmd, logfile, env={**os.environ, "SONAR_TOKEN": self.token})
         with open(logfile, encoding="utf-8", errors="replace") as fh:
             ok = "ANALYSIS SUCCESSFUL" in fh.read()
         if rc != 0 or not ok:
-            raise SonarError(f"analysis failed, see {os.path.basename(logfile)}")
+            raise SonarError(f"analysis failed, see logs/{os.path.basename(logfile)}")
 
-    def wait(self, key, timeout=600):
+    def wait(self, key, timeout=900):
         """The compute engine processes asynchronously; the API is empty until it has."""
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -122,34 +201,33 @@ class Sonar:
             time.sleep(5)
         raise SonarError("compute engine did not finish in time")
 
-    def export(self, key, outdir):
-        """Write issues/hotspots/measures to files so the digest can run offline."""
-        from .parsers.sonarqube import MEASURE_KEYS, Forbidden, fetch_all
-        out = {}
-        issues = fetch_all(self.host, self.token, "/api/issues/search",
-                           {"components": key, "resolved": "false"}, "issues")
+    def export(self, key, raw):
+        """Write issues/hotspots/measures, with totals, so the digest can run offline."""
+        issues, total = fetch_all(self.host, self.token, "/api/issues/search",
+                                  {"components": key, "resolved": "false"}, "issues")
         try:
-            hotspots = fetch_all(self.host, self.token, "/api/hotspots/search",
-                                 {"project": key, "status": "TO_REVIEW"}, "hotspots")
+            hs, htotal = fetch_all(self.host, self.token, "/api/hotspots/search",
+                                   {"project": key, "status": "TO_REVIEW"}, "hotspots")
+            hotspots = {"hotspots": hs, "total": htotal}
         except Forbidden:
-            hotspots = []
+            hotspots = {"hotspots": [], "error": "forbidden: token is not a user token"}
         measures = api(self.host, self.token, "/api/measures/component",
                        {"component": key, "metricKeys": MEASURE_KEYS})
-        for name, doc in (("issues", {"issues": issues}), ("hotspots", {"hotspots": hotspots}),
-                          ("measures", measures)):
-            path = os.path.join(outdir, f"sonar-{key}-{name}.json")
+        out = {}
+        for name, doc in (("issues", {"issues": issues, "total": total}),
+                          ("hotspots", hotspots), ("measures", measures)):
+            path = os.path.join(raw, f"sonar-{key}-{name}.json")
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(doc, fh)
             out[name] = path
         return out
 
     def down(self):
-        log("tearing down SonarQube")
-        run(self._compose("down", "-v"), os.path.join(self.logs, "sonar-down.log"))
-        try:
-            os.remove(self.envfile)
-        except OSError:
-            pass
+        log(f"tearing down {self.project}")
+        rc = run(self._compose("down", "-v"), os.path.join(self.logs, "sonar-down.log"))
+        shutil.rmtree(self.secret_dir, ignore_errors=True)
+        if rc != 0:
+            warn(f"teardown failed; remove it by hand: docker compose -p {self.project} down -v")
 
 
 # --------------------------------------------------------------------------
@@ -157,56 +235,45 @@ class Sonar:
 # --------------------------------------------------------------------------
 
 def snyk(args, cwd, out, logfile, severity):
+    """Returns "" on success, else the reason the product was not scanned."""
     rc = run(["snyk", *args, f"--severity-threshold={severity}", f"--json-file-output={out}"],
              logfile, cwd=cwd)
-    if rc == 0 and not _nonempty(out):
-        # A clean `snyk code test` writes no file at all. Clean is a result.
+    if rc == 0 and not _nonempty(out) and args[:2] == ["code", "test"]:
+        # A clean `snyk code test` writes no file. Record it as an empty SARIF
+        # run, which the parser recognises, rather than an arbitrary `{}`.
         with open(out, "w") as fh:
-            fh.write("{}")
-        return True
+            json.dump({"runs": []}, fh)
+        return ""
     if rc in (0, 1) and _nonempty(out):
-        return True
-    warn(f"snyk {' '.join(args[:2])} in {cwd}: exit {rc} - reported as not scanned")
+        return ""
     _rm(out)  # never leave a truncated file that would read as a short result
-    return False
+    return {3: "nothing to scan"}.get(rc, f"snyk exited {rc}, see logs")
 
 
-def _nonempty(path):
-    return os.path.exists(path) and os.path.getsize(path) > 0
+def render_helm(proj, root, logfile):
+    """Return (state, dir_or_reason): nochart | rendered | failed.
 
-
-def _rm(path):
-    try:
-        os.remove(path)
-    except OSError:
-        pass
-
-
-def render_helm(proj, root, dest):
-    """Return (state, dir): nochart | rendered | failed.
-
-    `snyk iac test` cannot parse Go templates. A raw chart tree either fails
-    loudly or, worse, exits 0 having scanned the one plain manifest beside it,
-    so a chart that will not render is reported as not scanned, never as clean.
+    `snyk iac test` cannot parse Go templates: a raw chart tree either fails
+    loudly or, worse, exits 0 having scanned the one plain manifest beside it.
+    The render goes to a private temp dir that the caller removes, because a
+    chart rendered with real values can contain Secret manifests.
     """
     helm = proj.get("helm")
     if not helm:
         return "nochart", root
     if not have("helm"):
-        warn("helm not on PATH - chart IaC reported as not scanned")
-        return "failed", None
-    chart = os.path.join(root, helm["chart"])
-    cmd = ["helm", "template", "release", chart]
+        return "failed", "helm not on PATH"
+    dest = tempfile.mkdtemp(prefix="qsd-render-")
+    cmd = ["helm", "template", "release", _inside(root, helm["chart"])]
     for v in helm.get("values") or []:
-        cmd += ["-f", os.path.join(root, v)]
-    os.makedirs(dest, exist_ok=True)
-    with open(os.path.join(dest, "chart.yaml"), "w") as fh:
-        if subprocess.run(cmd, stdout=fh, stderr=subprocess.DEVNULL).returncode != 0:
-            warn(f"helm template failed for {proj['name']} - IaC reported as not scanned")
-            return "failed", None
+        cmd += ["-f", _inside(root, v)]
+    with open(os.path.join(dest, "chart.yaml"), "w") as out, open(logfile, "w") as err:
+        if subprocess.run(cmd, stdout=out, stderr=err).returncode != 0:
+            shutil.rmtree(dest, ignore_errors=True)
+            return "failed", "helm template failed, see logs"
     extra = helm.get("extra_manifests")
     if extra:
-        src = os.path.join(root, extra)
+        src = _inside(root, extra)
         for f in os.listdir(src) if os.path.isdir(src) else []:
             if f.endswith((".yaml", ".yml")):
                 shutil.copy(os.path.join(src, f), dest)
@@ -214,162 +281,6 @@ def render_helm(proj, root, dest):
 
 
 # --------------------------------------------------------------------------
-
-def scan(config, base, out_dir, version="", tools=TOOLS):
-    """Run every enabled tool for every project. Returns the manifest dict."""
-    raw = os.path.join(out_dir, "raw")
-    logs = os.path.join(out_dir, "logs")
-    os.makedirs(raw, exist_ok=True)
-    os.makedirs(logs, exist_ok=True)
-    snyk_sev = config.get("snyk_severity", "high")
-    trivy_sev = config.get("trivy_severity", "CRITICAL,HIGH")
-    projects = []
-    for p in config["projects"]:
-        path = os.path.abspath(os.path.join(base, p["path"]))
-        projects.append({"cfg": p, "path": path, "name": p["name"], "out": {
-            "name": p["name"], "label": p.get("label") or p["name"],
-            "repo": p.get("repo", ""), "commit": git_sha(path)}})
-
-    shim = _python_shim() if "snyk" in tools else None
-    sonar = None
-    if "sonarqube" in tools:
-        if not have("docker"):
-            warn("docker not on PATH - SonarQube reported as not collected")
-        else:
-            sonar = Sonar(logs)
-    try:
-        if sonar:
-            try:
-                sonar.up()
-                for pr in projects:
-                    key = pr["cfg"].get("sonar_project_key") or pr["name"]
-                    sonar.scan(pr["path"], key, os.path.join(logs, f"{pr['name']}.sonar.log"))
-                for pr in projects:
-                    key = pr["cfg"].get("sonar_project_key") or pr["name"]
-                    sonar.wait(key)
-                    pr["out"]["sonarqube"] = sonar.export(key, raw)
-            except (SonarError, OSError) as exc:
-                warn(f"SonarQube: {exc}")
-        for pr in projects:
-            if "sonarqube" in tools:
-                pr["out"].setdefault("sonarqube", {})
-            _scan_project(pr, raw, logs, tools, snyk_sev, trivy_sev)
-    finally:
-        if sonar:
-            sonar.down()
-        if shim:
-            shutil.rmtree(shim, ignore_errors=True)
-
-    return {"title": config.get("title", ""), "version": version,
-            "projects": [pr["out"] for pr in projects]}
-
-
-def _scan_project(pr, raw, logs, tools, snyk_sev, trivy_sev):
-    cfg, path, name, out = pr["cfg"], pr["path"], pr["name"], pr["out"]
-    stem = os.path.join(raw, name)
-    lg = lambda tool: os.path.join(logs, f"{name}.{tool}.log")  # noqa: E731
-
-    if "snyk" in tools:
-        products = {"Open Source": f"{stem}-snyk-oss.json", "Code": f"{stem}-snyk-code.json",
-                    "IaC": f"{stem}-snyk-iac.json"}
-        if cfg.get("image"):
-            products["Container"] = f"{stem}-snyk-container.json"
-        out["snyk"] = dict(products)
-        if not have("snyk"):
-            warn("snyk not on PATH - Snyk reported as not collected")
-        else:
-            log(f"Snyk: {name}")
-            # --fail-fast turns a partially scanned --all-projects run into a
-            # failure instead of a complete-looking partial result.
-            oss = cfg.get("snyk_open_source_args") or ["--all-projects", "--fail-fast"]
-            snyk(["test", *oss], path, products["Open Source"], lg("snyk-oss"), snyk_sev)
-            snyk(["code", "test"], path, products["Code"], lg("snyk-code"), snyk_sev)
-            state, iac_dir = render_helm(cfg, path, os.path.join(raw, f".rendered-{name}"))
-            if state != "failed":
-                # snyk iac refuses a target outside cwd, so run inside the render.
-                snyk(["iac", "test", "."], iac_dir, products["IaC"], lg("snyk-iac"), snyk_sev)
-            if cfg.get("image"):
-                snyk(["container", "test", cfg["image"]], path, products["Container"],
-                     lg("snyk-container"), snyk_sev)
-
-    if "trivy" in tools:
-        out["trivy"] = {"Config": f"{stem}-trivy-config.json"}
-        helm = cfg.get("helm")
-        if helm:
-            out["trivy"]["Chart"] = f"{stem}-trivy-chart.json"
-        if not have("trivy"):
-            warn("trivy not on PATH - Trivy reported as not collected")
-        else:
-            log(f"Trivy: {name}")
-            _trivy(["config", "--quiet", "--severity", trivy_sev, "--format", "json",
-                    "--output", out["trivy"]["Config"], path], out["trivy"]["Config"],
-                   lg("trivy-config"))
-            if helm:
-                cmd = ["config", "--quiet", "--severity", trivy_sev, "--format", "json",
-                       "--output", out["trivy"]["Chart"]]
-                for v in helm.get("values") or []:
-                    cmd += ["--helm-values", os.path.join(path, v)]
-                _trivy(cmd + [os.path.join(path, helm["chart"])], out["trivy"]["Chart"],
-                       lg("trivy-chart"))
-
-    if "semgrep" in tools:
-        out["semgrep"] = f"{stem}-semgrep.json"
-        if not have("semgrep"):
-            warn("semgrep not on PATH - Semgrep reported as not collected")
-        else:
-            _semgrep(cfg, path, out["semgrep"], lg("semgrep"))
-
-    if "dependabot" in tools:
-        out["dependabot"] = f"{stem}-dependabot.json"
-        if not cfg.get("repo"):
-            warn(f"{name}: no `repo` (owner/name) - Dependabot reported as not collected")
-        elif not have("gh"):
-            warn("gh not on PATH - Dependabot reported as not collected")
-        else:
-            log(f"Dependabot: {cfg['repo']}")
-            with open(out["dependabot"], "w") as fh:
-                rc = subprocess.run(
-                    ["gh", "api", f"/repos/{cfg['repo']}/dependabot/alerts?state=open&per_page=100",
-                     "--paginate"], stdout=fh, stderr=subprocess.DEVNULL).returncode
-            if rc != 0:
-                warn(f"Dependabot fetch failed for {cfg['repo']} - reported as not collected")
-                _rm(out["dependabot"])
-
-    if cfg.get("coverage"):
-        out["coverage"] = os.path.join(path, cfg["coverage"])
-
-
-def _trivy(args, out, logfile):
-    # `trivy config` exits 0 even with findings, so any nonzero is a real failure.
-    rc = run(["trivy", *args], logfile)
-    if rc != 0 or not _nonempty(out):
-        warn(f"trivy {args[0]} failed (exit {rc}) - reported as not scanned")
-        _rm(out)
-
-
-def _semgrep(cfg, path, out, logfile):
-    token = os.environ.get("SEMGREP_APP_TOKEN")
-    if token:
-        # `semgrep ci` applies your organisation's policy (Code + Supply Chain).
-        env = dict(os.environ)
-        if cfg.get("repo"):
-            env.update(SEMGREP_REPO_NAME=cfg["repo"],
-                       SEMGREP_REPO_URL=f"https://github.com/{cfg['repo']}",
-                       SEMGREP_COMMIT=git_sha(path))
-        cmd = ["semgrep", "ci", "--code", "--supply-chain", "--json",
-               f"--json-output={out}", "--metrics=off"]
-    else:
-        # Without a token, an explicit public ruleset. The label stays "Semgrep",
-        # so say in the config which ruleset produced the numbers.
-        env = None
-        cmd = ["semgrep", "scan", "--config", cfg.get("semgrep_config", "p/default"), "--json",
-               f"--json-output={out}", "--metrics=off"]
-    log(f"Semgrep: {cfg['name']}")
-    rc = run(cmd, logfile, cwd=path, env=env)
-    if rc not in (0, 1) or not _nonempty(out):
-        warn(f"semgrep {cfg['name']} failed (exit {rc}) - reported as not scanned")
-        _rm(out)
-
 
 def _python_shim():
     """Snyk shells out to `python` for Poetry projects; some systems ship only python3."""
@@ -379,3 +290,251 @@ def _python_shim():
     os.symlink(shutil.which("python3"), os.path.join(shim, "python"))
     os.environ["PATH"] = f"{shim}{os.pathsep}{os.environ.get('PATH', '')}"
     return shim
+
+
+def scan(config, base, out_dir, version="", tools=TOOLS):
+    """Run every enabled tool for every project. Returns (manifest, run_dir)."""
+    validate(config, base)
+    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    os.makedirs(out_dir, mode=0o700, exist_ok=True)
+    run_dir = os.path.join(out_dir, f"run-{stamp}-{secrets.token_hex(3)}")
+    os.mkdir(run_dir, 0o700)  # fresh: fails rather than reuse an old run
+    raw, logs = os.path.join(run_dir, "raw"), os.path.join(run_dir, "logs")
+    os.mkdir(raw, 0o700)
+    os.mkdir(logs, 0o700)
+    old_umask = os.umask(0o077)  # raw outputs and logs can hold code and secrets
+
+    settings = {"snyk_severity": config.get("snyk_severity", "high"),
+                "trivy_severity": config.get("trivy_severity", "CRITICAL,HIGH"),
+                "semgrep": "org policy (semgrep ci)" if os.environ.get("SEMGREP_APP_TOKEN")
+                else "public ruleset"}
+    projects = []
+    for p in config["projects"]:
+        path = os.path.realpath(os.path.join(base, p["path"]))
+        projects.append({"cfg": p, "path": path, "name": p["name"], "out": {
+            "name": p["name"], "label": p.get("label") or p["name"],
+            "repo": p.get("repo", ""), "commit": git_sha(path), "notes": {}}})
+
+    shim = _python_shim() if "snyk" in tools else None
+    sonar = None
+    try:
+        if "sonarqube" in tools:
+            if not have("docker"):
+                for pr in projects:
+                    pr["out"]["sonarqube"] = {}
+                    pr["out"]["notes"]["SonarQube"] = "docker not on PATH"
+            else:
+                sonar = Sonar(logs)
+                try:
+                    sonar.up()
+                    for pr in projects:
+                        key = pr["cfg"].get("sonar_project_key") or pr["name"]
+                        sonar.scan(pr["path"], key, os.path.join(logs, f"{pr['name']}.sonar.log"))
+                    for pr in projects:
+                        key = pr["cfg"].get("sonar_project_key") or pr["name"]
+                        sonar.wait(key)
+                        pr["out"]["sonarqube"] = sonar.export(key, raw)
+                except (SonarError, OSError, ValueError, KeyError) as exc:
+                    warn(f"SonarQube: {exc}")
+                    for pr in projects:
+                        pr["out"].setdefault("sonarqube", {})
+                        pr["out"]["notes"]["SonarQube"] = str(exc)
+        for pr in projects:
+            _scan_project(pr, raw, logs, tools, settings)
+    finally:
+        if sonar:
+            sonar.down()
+        if shim:
+            shutil.rmtree(shim, ignore_errors=True)
+        os.umask(old_umask)
+
+    manifest = {"title": config.get("title", ""), "version": version, "settings": settings,
+                "projects": [pr["out"] for pr in projects]}
+    return manifest, run_dir
+
+
+def _scan_project(pr, raw, logs, tools, settings):
+    cfg, path, name, out = pr["cfg"], pr["path"], pr["name"], pr["out"]
+    notes = out["notes"]
+    stem = os.path.join(raw, name)
+
+    def lg(tool):
+        return os.path.join(logs, f"{name}.{tool}.log")
+
+    if "snyk" in tools:
+        products = {"Open Source": f"{stem}-snyk-oss.json", "Code": f"{stem}-snyk-code.json",
+                    "IaC": f"{stem}-snyk-iac.json"}
+        if cfg.get("image"):
+            products["Container"] = f"{stem}-snyk-container.json"
+        out["snyk"] = dict(products)
+        if not have("snyk"):
+            for p in products:
+                notes[f"Snyk {p}"] = "snyk not on PATH"
+        else:
+            log(f"Snyk: {name}")
+            sev = settings["snyk_severity"]
+            # --fail-fast turns a partially scanned --all-projects run into a
+            # failure instead of a complete-looking partial result.
+            oss = cfg.get("snyk_open_source_args") or ["--all-projects", "--fail-fast"]
+            for prod, args in (("Open Source", ["test", *oss]), ("Code", ["code", "test"])):
+                why = snyk(args, path, products[prod], lg(f"snyk-{prod.split()[0].lower()}"), sev)
+                if why:
+                    notes[f"Snyk {prod}"] = why
+            state, where = render_helm(cfg, path, lg("helm"))
+            if state == "failed":
+                notes["Snyk IaC"] = where
+                _rm(products["IaC"])
+            else:
+                try:
+                    # snyk iac refuses a target outside cwd, so run inside the render.
+                    why = snyk(["iac", "test", "."], where, products["IaC"], lg("snyk-iac"), sev)
+                    if why:
+                        notes["Snyk IaC"] = why
+                finally:
+                    if state == "rendered":
+                        shutil.rmtree(where, ignore_errors=True)
+            if cfg.get("image"):
+                why = snyk(["container", "test", cfg["image"]], path, products["Container"],
+                           lg("snyk-container"), sev)
+                if why:
+                    notes["Snyk Container"] = why
+
+    if "trivy" in tools:
+        out["trivy"] = {"Config": f"{stem}-trivy-config.json"}
+        helm = cfg.get("helm")
+        if helm:
+            out["trivy"]["Chart"] = f"{stem}-trivy-chart.json"
+        if not have("trivy"):
+            for t in out["trivy"]:
+                notes[f"Trivy {t}"] = "trivy not on PATH"
+        else:
+            log(f"Trivy: {name}")
+            base = ["config", "--quiet", "--severity", settings["trivy_severity"],
+                    "--format", "json", "--output"]
+            _trivy(base + [out["trivy"]["Config"], path], out["trivy"]["Config"],
+                   lg("trivy-config"), notes, "Trivy Config")
+            if helm:
+                cmd = base + [out["trivy"]["Chart"]]
+                for v in helm.get("values") or []:
+                    cmd += ["--helm-values", _inside(path, v)]
+                _trivy(cmd + [_inside(path, helm["chart"])], out["trivy"]["Chart"],
+                       lg("trivy-chart"), notes, "Trivy Chart")
+
+    if "semgrep" in tools:
+        out["semgrep"] = f"{stem}-semgrep.json"
+        if not have("semgrep"):
+            notes["Semgrep"] = "semgrep not on PATH"
+        else:
+            _semgrep(cfg, path, out["semgrep"], lg("semgrep"), notes)
+
+    if "dependabot" in tools:
+        out["dependabot"] = f"{stem}-dependabot.json"
+        if not cfg.get("repo"):
+            notes["Dependabot"] = "no `repo` (owner/name) in config"
+        elif not have("gh"):
+            notes["Dependabot"] = "gh not on PATH"
+        else:
+            log(f"Dependabot: {cfg['repo']}")
+            with open(out["dependabot"], "w") as fh, open(lg("dependabot"), "w") as err:
+                rc = subprocess.run(
+                    ["gh", "api", f"/repos/{cfg['repo']}/dependabot/alerts?state=open&per_page=100",
+                     "--paginate"], stdout=fh, stderr=err).returncode
+            if rc != 0:
+                notes["Dependabot"] = "gh api failed, see logs"
+                _rm(out["dependabot"])
+
+    if "clamav" in tools:
+        out["clamav"] = f"{stem}-clamav.txt"
+        _clamav(path, out["clamav"], lg("clamav"), notes)
+
+    if "guarddog" in tools and cfg.get("guarddog"):
+        out["guarddog"] = {}
+        for i, g in enumerate(cfg["guarddog"]):
+            label = g["manifest"]
+            dest = f"{stem}-guarddog-{i}.json"
+            out["guarddog"][label] = {"path": dest, "ecosystem": g["ecosystem"],
+                                      "manifest": g["manifest"]}
+            _guarddog(g, path, dest, lg(f"guarddog-{i}"), notes, f"GuardDog {label}")
+
+    if cfg.get("coverage"):
+        out["coverage"] = _inside(path, cfg["coverage"])
+
+
+def _trivy(args, out, logfile, notes, source):
+    # `trivy config` exits 0 even with findings, so any nonzero is a real failure.
+    rc = run(["trivy", *args], logfile)
+    if rc != 0 or not _nonempty(out):
+        notes[source] = f"trivy exited {rc}, see logs"
+        _rm(out)
+
+
+def _semgrep(cfg, path, out, logfile, notes):
+    env = {k: v for k, v in os.environ.items() if k not in _DIFF_AWARE_ENV}
+    if env.get("SEMGREP_APP_TOKEN"):
+        # `semgrep ci` applies your organisation's policy (Code + Supply Chain).
+        if cfg.get("repo"):
+            env.update(SEMGREP_REPO_NAME=cfg["repo"],
+                       SEMGREP_REPO_URL=f"https://github.com/{cfg['repo']}",
+                       SEMGREP_COMMIT=git_sha(path))
+        cmd = ["semgrep", "ci", "--code", "--supply-chain", "--json",
+               f"--json-output={out}", "--metrics=off"]
+    else:
+        cmd = ["semgrep", "scan", "--config", cfg.get("semgrep_config", "p/default"), "--json",
+               f"--json-output={out}", "--metrics=off"]
+    log(f"Semgrep: {cfg['name']}")
+    rc = run(cmd, logfile, cwd=path, env=env)
+    if rc not in (0, 1) or not _nonempty(out):
+        notes["Semgrep"] = f"semgrep exited {rc}, see logs"
+        _rm(out)
+
+
+def _clamav(path, out, logfile, notes):
+    """Native clamscan when it has a database; otherwise the official image,
+    which refreshes its signatures in the same container before scanning."""
+    native = have("clamscan") and _clamav_db_ready()
+    if native:
+        cmd, cwd = ["clamscan", "-r", "--infected", "--no-summary", "--stdout", "."], path
+    elif have("docker"):
+        cmd = ["docker", "run", "--rm", "--platform", "linux/amd64", "--entrypoint", "sh",
+               "-v", f"{path}:/scan:ro", CLAMAV_IMAGE, "-c",
+               "freshclam --quiet >/dev/null 2>&1; cd /scan && "
+               "clamscan -r --infected --no-summary --stdout ."]
+        cwd = None
+    else:
+        notes["ClamAV"] = "neither clamscan (with a database) nor docker available"
+        return
+    log("ClamAV: " + ("clamscan" if native else "clamav/clamav container"))
+    with open(out, "w", encoding="utf-8") as fh, open(logfile, "w") as err:
+        fh.write(f"# qsd clamav {'native' if native else CLAMAV_IMAGE}\n")
+        fh.flush()
+        rc = subprocess.run(cmd, cwd=cwd, stdout=fh, stderr=err).returncode
+    # 0 clean, 1 found; 2 is an error and its partial output would read as clean.
+    if rc not in (0, 1):
+        notes["ClamAV"] = f"clamscan exited {rc}, see logs"
+        _rm(out)
+
+
+def _clamav_db_ready():
+    try:
+        r = subprocess.run(["clamscan", "--version"], capture_output=True, text=True, timeout=30)
+        # "ClamAV 1.x/<db version>/<date>" carries a database version only when one is loaded.
+        return r.returncode == 0 and r.stdout.count("/") >= 2
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _guarddog(g, path, out, logfile, notes, source):
+    if g.get("ecosystem") not in GUARDDOG_ECOSYSTEMS:
+        notes[source] = f"unsupported ecosystem {g.get('ecosystem')!r}"
+        return
+    if not have("guarddog"):
+        notes[source] = "guarddog not on PATH"
+        return
+    manifest = _inside(path, g["manifest"])
+    log(f"GuardDog: {g['ecosystem']} {g['manifest']}")
+    with open(out, "w") as fh, open(logfile, "w") as err:
+        rc = subprocess.run(["guarddog", g["ecosystem"], "verify", manifest,
+                             "--output-format", "json"], stdout=fh, stderr=err).returncode
+    if rc != 0 or not _nonempty(out):
+        notes[source] = f"guarddog exited {rc}, see logs"
+        _rm(out)

@@ -24,5 +24,5 @@ def load(path):
         return {"pct": round(float(lines["pct"]), 1),
                 "covered": int(lines.get("covered") or 0),
                 "measured": int(lines.get("total") or 0)}, ""
-    except (OSError, ET.ParseError, ValueError) as exc:
+    except (OSError, ET.ParseError, ValueError, AttributeError) as exc:
         return None, f"coverage unreadable ({exc.__class__.__name__})"

@@ -1,44 +1,49 @@
 # quality-scan-digest
 
-Run five code and supply-chain scanners against your repositories, merge what they
-report into **one deduplicated list**, and export it as **JSON** (plus an optional
+Run seven code, supply-chain and malware scanners against your repositories, merge what
+they report into **one deduplicated list**, and export it as **JSON** (plus an optional
 self-contained HTML report).
 
 | Tool | What it reads |
 |---|---|
-| **SonarQube** | Source: bugs, vulnerabilities, code smells, security hotspots, size and duplication |
+| **SonarQube** | Source: bugs, vulnerabilities, code smells, security hotspots, size |
 | **Snyk** | Open Source dependencies, Code (SAST), IaC and Container images |
 | **Trivy** | Dockerfile instructions and Helm charts (`trivy config`) |
-| **Semgrep** | Code (SAST) and Supply Chain advisories |
+| **Semgrep** | Code (SAST) and, with a Semgrep token, Supply Chain advisories |
 | **Dependabot** | Open dependency alerts, fetched from GitHub |
+| **ClamAV** | Known malware in the checkout (signature scan) |
+| **GuardDog** | Malicious or risky PyPI / npm / Go packages in your dependency manifests |
 
 Test coverage (Cobertura XML or an Istanbul `coverage-summary.json`) can ride along.
 
-Python 3.10+, standard library only. No server: SonarQube runs as a throwaway
-container that is started, scanned against, exported and destroyed in one run.
+Python 3.10+, standard library only. No server: SonarQube runs as a throwaway container
+that is started, scanned against, exported and destroyed in one run.
 
 ## Why
 
-The five tools overlap. Snyk, Semgrep Supply Chain, Trivy and Dependabot all read the
-same advisory databases; SonarQube, Snyk Code and Semgrep all do SAST. Added up naively,
-one vulnerable package shows up three times and every headline number is inflated.
-`qsd` lists each problem once and records every scanner that saw it.
+**The tools overlap.** Snyk, Semgrep Supply Chain, Trivy and Dependabot read the same
+advisory databases, so one vulnerable package can show up three or four times and
+every headline number is inflated. `qsd` lists each problem once, records every scanner
+that saw it, and keeps the other sightings in full.
 
-It is also built to make a **partial scan visible**. A tool that is missing, not
-authenticated, or fails is reported as *not collected*, never as an empty, reassuring
-result.
+**A partial scan must look partial.** Every source is reported as *collected*,
+*incomplete* (with what is missing), or *not collected* (with why). A tool that is
+missing, unauthenticated, fails, or writes an error instead of results is never read
+as an empty, clean result. `--strict` turns any gap into a failing exit code.
 
 ## Install
 
 ```bash
-pip install git+https://github.com/CloudBater/quality-scan-digest
+pip install git+https://github.com/CloudBater/quality-scan-digest@v0.1.0
 qsd --version
 ```
 
-Install whichever scanners you want to use; each one is optional:
-`docker` (SonarQube), [`snyk`](https://docs.snyk.io/snyk-cli), [`trivy`](https://trivy.dev),
+Install whichever scanners you want; each is optional and a missing one is reported:
+`docker` (SonarQube, and ClamAV if `clamscan` is not installed),
+[`snyk`](https://docs.snyk.io/snyk-cli), [`trivy`](https://trivy.dev),
 [`semgrep`](https://semgrep.dev/docs/getting-started/), [`gh`](https://cli.github.com)
-(Dependabot), and `helm` if you scan charts.
+(Dependabot), [`clamscan`](https://docs.clamav.net) with a current database
+(`freshclam`), [`guarddog`](https://github.com/DataDog/guarddog), and `helm` if you scan charts.
 
 ## Usage
 
@@ -48,59 +53,75 @@ Install whichever scanners you want to use; each one is optional:
 qsd scan examples/qsd.example.json --release v1.4.0 --out-dir qsd-out
 ```
 
-Writes `qsd-out/report.json`, `qsd-out/report.html`, the raw tool outputs under
-`qsd-out/raw/`, per-tool logs under `qsd-out/logs/`, and `qsd-out/manifest.json`.
+Each run writes a fresh, private (`0700`) directory `qsd-out/run-<timestamp>-<id>/` with
+`report.json`, `report.html`, `manifest.json`, the raw tool outputs under `raw/` and
+per-tool logs under `logs/`. **Treat that directory as sensitive**: raw outputs and
+logs contain code snippets and findings about your systems.
 
-Limit the tools with `--tools snyk,trivy,semgrep`. Paths in the config resolve
-against the config file. See [`examples/qsd.example.json`](examples/qsd.example.json):
+Limit the tools with `--tools snyk,trivy,clamav`. Paths in the config resolve against
+the config file and may not point outside the project. See
+[`examples/qsd.example.json`](examples/qsd.example.json):
 
 | Key | Meaning |
 |---|---|
-| `name`, `label` | Project id and display name |
+| `name` | Project id: letters, digits, `.`, `_`, `-`; unique |
+| `label` | Display name; unique |
 | `path` | Local checkout to scan. Scan the release ref, not a working copy |
 | `repo` | `owner/name` on GitHub, for Dependabot |
 | `sonar_project_key` | Defaults to `name` |
 | `snyk_open_source_args` | Defaults to `--all-projects --fail-fast` |
 | `image` | Image for Snyk Container. Pin a **digest** of what you shipped, not a moving tag |
-| `helm.chart`, `helm.values`, `helm.extra_manifests` | Rendered before IaC scanning; Snyk cannot parse raw templates |
+| `helm.chart`, `helm.values`, `helm.extra_manifests` | Rendered into a temp dir (removed afterwards) before IaC scanning; Snyk cannot parse raw templates |
 | `semgrep_config` | Ruleset used when `SEMGREP_APP_TOKEN` is not set (default `p/default`) |
+| `guarddog` | List of `{"ecosystem": "pypi" \| "npm" \| "go" \| "github_action", "manifest": "requirements.txt"}` |
 | `coverage` | Coverage file inside the checkout |
 
+Top level: `snyk_severity` (default `high`) and `trivy_severity` (default
+`CRITICAL,HIGH`). These floors are recorded in the report's `settings`, because zero
+findings above a floor is not the same claim as zero findings.
+
 Environment: `SEMGREP_APP_TOKEN` switches Semgrep to `semgrep ci` with your
-organisation's policy; `QSD_SONAR_PORT` (default `9000`) and `QSD_SCANNER_IMAGE`
-tune the SonarQube container. Snyk and `gh` use their own login.
+organisation's policy (always a full scan, never diff-aware). `QSD_SONAR_PORT`,
+`QSD_SCANNER_IMAGE` and `QSD_CLAMAV_IMAGE` override the defaults. Snyk and `gh` use
+their own login.
 
 ### 2. Digest outputs you already have (CI)
 
-If your pipeline already runs the tools, point a manifest at their JSON outputs:
+If your pipeline already runs the tools, point a manifest at their outputs:
 
 ```bash
-qsd digest manifest.json --json-out report.json --html-out report.html
+qsd digest manifest.json --json-out report.json --html-out report.html --strict
 ```
 
-See [`examples/manifest.example.json`](examples/manifest.example.json). SonarQube can
-be read from exported API responses (`issues`, `hotspots`, `measures`) or live from
-`{"host": "...", "project_key": "..."}` with `SONAR_TOKEN` set (a user token: an
-analysis token cannot read hotspots).
+See [`examples/manifest.example.json`](examples/manifest.example.json). Trivy
+vulnerability output (`trivy fs|image --format json`) is also accepted here.
 
-The command exits non-zero when **no** source was collected.
+SonarQube is read from exported API responses (`issues`, `hotspots`, `measures`) or
+live from `{"host": "...", "project_key": "..."}` with `SONAR_TOKEN` set. The token is
+only sent to `https://` hosts or plain HTTP on loopback, redirects are never followed,
+and a token is never read from the manifest itself. Use a user token: an analysis
+token cannot read hotspots, which is reported as incomplete.
+
+Exit codes: `1` when **no** source was collected or the input is invalid; with
+`--strict`, `2` when any listed source is not collected completely.
 
 ## Deduplication
 
-Three passes, in order. Each is conservative on purpose: a wrong merge hides a
-finding, a missed merge only over-counts.
+Each pass is conservative on purpose: a wrong merge hides a finding, a missed merge only
+over-counts.
 
-| Pass | Merges rows that share |
-|---|---|
-| `exact` | project, source, rule, location, line and message |
-| `advisory` | project, a CVE/GHSA id, and the same package (names normalised; a sighting with no package joins only when the id names one package) |
-| `sast` | project, file, line and a CWE — across tools, and across two rules of one tool flagging the same line |
+| Pass | Default | Merges rows that share |
+|---|---|---|
+| `exact` | on | project, source, kind, rule, location, line and message |
+| `advisory` | on | project, package (ecosystem-aware name rules), and a CVE/GHSA id. A row with no package joins only when every id it carries points to one package group |
+| `sast` | **off** | project, file, line and CWE, reported by **different** scanners; each row joins at most one group, so nothing chains |
 
-The surviving row comes from the richest source (Snyk, Semgrep, SonarQube, Trivy,
-Dependabot, in that order), takes the **most severe** severity of the group, and keeps
-the others under `also`. `by` lists every scanner that saw it. Nothing merges across
-projects. Snyk IaC and Trivy use unrelated rule catalogues, so misconfigurations are
-not merged. Choose passes with `--dedup exact,advisory` or turn it off with `--dedup none`.
+The surviving row comes from the richest source, takes the **most severe** severity
+of the group, and keeps every other sighting (message, severity, rule, location, fix)
+under `also`. `by` lists every scanner that saw it. Nothing merges across projects;
+Snyk IaC and Trivy use unrelated rule catalogues, so misconfigurations are not merged.
+Choose passes with `--dedup exact,advisory,sast` or turn it off with `--dedup none`.
+Parsers themselves keep every affected version and manifest.
 
 ## Output
 
@@ -110,37 +131,47 @@ not merged. Choose passes with `--dedup exact,advisory` or turn it off with `--d
 {
   "schema_version": "1.0",
   "title": "…", "version": "v1.4.0", "generated_at": "…",
-  "generated_from": [ { "project": "API", "repo": "…", "commit": "…",
+  "settings": { "snyk_severity": "high", "trivy_severity": "CRITICAL,HIGH", "dedup": "exact,advisory" },
+  "generated_from": [ { "project_id": "api", "project": "API", "repo": "…", "commit": "…",
                         "sonar": {…}, "coverage": {…}, "dependabot": {…},
                         "findings": 120, "security": 40, "sec_crit_high": 3, "by_source": {…} } ],
-  "sources": { "API: Snyk Code": { "collected": true, "note": "" } },
-  "dedup":   { "input": 180, "exact": 4, "advisory": 50, "sast": 6, "output": 120 },
-  "findings": [ { "id": "…", "proj": "API", "src": "Snyk", "by": ["Snyk", "Dependabot"],
-                  "kind": "Dependency", "sev": "HIGH", "rank": 1, "msg": "…",
-                  "loc": "django@4.2.0", "line": "", "ref": "SNYK-…",
-                  "ids": ["CVE-…"], "cwe": ["CWE-89"], "fix": "upgrade to …", "also": [ … ] } ]
+  "sources": { "API: Semgrep": { "collected": true, "complete": false, "note": "incomplete: 2 scan error(s)" } },
+  "dedup":   { "input": 180, "passes": ["exact", "advisory"], "exact": 4, "advisory": 56, "output": 120 },
+  "findings": [ { "id": "…", "project_id": "api", "proj": "API", "src": "Snyk",
+                  "by": ["Snyk", "Dependabot"], "kind": "Dependency", "security": true,
+                  "sev": "HIGH", "rank": 1, "msg": "…", "loc": "poetry.lock: django@4.2.0",
+                  "line": "", "ref": "SNYK-…", "ids": ["CVE-…"], "cwe": ["CWE-89"],
+                  "fix": "upgrade to …", "also": [ { "src": "Dependabot", "sev": "MEDIUM", "msg": "…" } ] } ]
 }
 ```
 
 Severities are normalised onto one scale (`rank` 0 = CRITICAL/BLOCKER … 4 = INFO).
-`id` is stable while the code around a finding does not move, so it can key triage
-state across runs.
+`security` is decided by what a finding is (dependency, container, IaC,
+misconfiguration, vulnerability, hotspot, malware, package risk), not by which scanner
+reported it. `id` is a content hash, unique within a report; it changes when the
+finding's message, location or line changes.
 
-## Caveats
+## Security notes
 
-- Scan what you shipped. A mutable image tag or a dirty working copy describes
-  something else.
-- `trivy config` exits 0 with findings and `snyk` exits 1 with findings; both are
-  handled. Any other exit is reported as not scanned and its partial output removed.
+- Raw outputs, logs and the rendered report can contain code and secrets from the
+  scanned repositories. Do not publish them as public CI artifacts.
+- The throwaway SonarQube binds to `127.0.0.1` on a random port, uses its documented
+  first-boot `admin` login only to mint a token, then rotates that password. Each run
+  uses its own compose project and removes it, with its volumes, at the end.
+- The scanner and ClamAV images are pinned by digest; Actions are pinned by commit SHA.
 - On Linux, SonarQube needs `vm.max_map_count >= 524288` on the host.
-- The throwaway SonarQube uses its first-boot `admin` login to mint a token. It binds
-  to `127.0.0.1` only and is destroyed at the end of the run.
+- GuardDog downloads each listed dependency from its registry to analyse it (it does
+  not install or execute it). Capability rules (`capability-*`) only say what a package
+  *can* do and are reported as LOW; `threat-*` rules are HIGH.
+- Report vulnerabilities in this tool privately: see [SECURITY.md](SECURITY.md).
 
 ## Development
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [CHANGELOG](CHANGELOG.md).
 
 ## License
 

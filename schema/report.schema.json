@@ -1,97 +1,373 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  
   "title": "quality-scan-digest report",
   "type": "object",
-  "required": ["schema_version", "title", "version", "generated_from", "sources", "dedup", "findings"],
+  "required": [
+    "schema_version",
+    "title",
+    "version",
+    "settings",
+    "generated_from",
+    "sources",
+    "dedup",
+    "findings"
+  ],
   "properties": {
-    "schema_version": { "const": "1.0" },
+    "schema_version": {
+      "const": "1.0"
+    },
     "generator": {
       "type": "object",
-      "properties": { "name": { "type": "string" }, "version": { "type": "string" } }
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      }
     },
-    "generated_at": { "type": "string", "format": "date-time" },
-    "title": { "type": "string" },
-    "version": { "type": "string", "description": "Release label of the scanned code" },
-    "generated_from": { "type": "array", "items": { "$ref": "#/$defs/project" } },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "title": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string",
+      "description": "Release label of the scanned code"
+    },
+    "generated_from": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/project"
+      }
+    },
     "sources": {
       "type": "object",
       "description": "Keyed \"<project label>: <source>\"",
       "additionalProperties": {
         "type": "object",
-        "required": ["collected", "note"],
-        "properties": { "collected": { "type": "boolean" }, "note": { "type": "string" } }
+        "required": [
+          "collected",
+          "complete",
+          "note"
+        ],
+        "properties": {
+          "collected": {
+            "type": "boolean"
+          },
+          "complete": {
+            "type": "boolean",
+            "description": "collected and nothing reported missing"
+          },
+          "note": {
+            "type": "string"
+          }
+        }
       }
     },
     "dedup": {
       "type": "object",
-      "required": ["input", "output"],
+      "required": [
+        "input",
+        "output"
+      ],
       "properties": {
-        "input": { "type": "integer" }, "output": { "type": "integer" },
-        "exact": { "type": "integer" }, "advisory": { "type": "integer" }, "sast": { "type": "integer" }
+        "input": {
+          "type": "integer"
+        },
+        "output": {
+          "type": "integer"
+        },
+        "exact": {
+          "type": "integer"
+        },
+        "advisory": {
+          "type": "integer"
+        },
+        "sast": {
+          "type": "integer"
+        },
+        "passes": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "exact",
+              "advisory",
+              "sast"
+            ]
+          }
+        }
       }
     },
-    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } }
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "settings": {
+      "type": "object",
+      "description": "Severity floors, rulesets and dedup passes the scan ran with",
+      "additionalProperties": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    }
   },
   "$defs": {
     "coverage": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "properties": {
-        "pct": { "type": "number" }, "covered": { "type": "integer" }, "measured": { "type": "integer" }
+        "pct": {
+          "type": "number"
+        },
+        "covered": {
+          "type": "integer"
+        },
+        "measured": {
+          "type": "integer"
+        }
       }
     },
     "project": {
       "type": "object",
-      "required": ["project", "findings", "security", "sec_crit_high"],
+      "required": [
+        "project_id",
+        "project",
+        "repo",
+        "commit",
+        "findings",
+        "security",
+        "sec_crit_high"
+      ],
       "properties": {
-        "project": { "type": "string" },
-        "repo": { "type": "string" },
-        "commit": { "type": "string" },
-        "sonar": { "type": "object", "additionalProperties": { "type": ["string", "null"] } },
-        "coverage": { "$ref": "#/$defs/coverage" },
-        "dependabot": {
-          "type": ["object", "null"],
-          "properties": {
-            "total": { "type": "integer" }, "unique": { "type": "integer" },
-            "by_sev": { "type": "object", "additionalProperties": { "type": "integer" } }
+        "project": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "commit": {
+          "type": "string"
+        },
+        "sonar": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
-        "deps": { "type": ["integer", "null"] },
-        "findings": { "type": "integer" },
-        "security": { "type": "integer" },
-        "sec_crit_high": { "type": "integer" },
-        "by_source": { "type": "object", "additionalProperties": { "type": "integer" } },
-        "snyk": { "type": "integer" }, "semgrep": { "type": "integer" }, "trivy": { "type": "integer" }
+        "coverage": {
+          "$ref": "#/$defs/coverage"
+        },
+        "dependabot": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "total": {
+              "type": "integer"
+            },
+            "unique": {
+              "type": "integer"
+            },
+            "by_sev": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        "deps": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "findings": {
+          "type": "integer"
+        },
+        "security": {
+          "type": "integer"
+        },
+        "sec_crit_high": {
+          "type": "integer"
+        },
+        "by_source": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        },
+        "snyk": {
+          "type": "integer"
+        },
+        "semgrep": {
+          "type": "integer"
+        },
+        "trivy": {
+          "type": "integer"
+        },
+        "project_id": {
+          "type": "string"
+        }
       }
     },
     "finding": {
       "type": "object",
-      "required": ["id", "proj", "src", "by", "kind", "sev", "rank", "msg", "loc", "line", "ref", "fix", "ids", "cwe", "also"],
+      "required": [
+        "id",
+        "project_id",
+        "proj",
+        "src",
+        "by",
+        "kind",
+        "sev",
+        "rank",
+        "msg",
+        "loc",
+        "line",
+        "ref",
+        "fix",
+        "ids",
+        "cwe",
+        "security",
+        "also"
+      ],
       "properties": {
-        "id": { "type": "string", "description": "Stable fingerprint of project, source, rule, location and line" },
-        "proj": { "type": "string" },
-        "src": { "enum": ["SonarQube", "Snyk", "Trivy", "Semgrep", "Dependabot"] },
-        "by": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
-        "kind": { "type": "string" },
-        "sev": { "type": "string" },
-        "rank": { "type": "integer", "minimum": 0, "maximum": 5 },
-        "msg": { "type": "string" },
-        "loc": { "type": "string", "description": "File path, or package@version" },
-        "line": { "type": ["integer", "string"] },
-        "ref": { "type": "string", "description": "The tool's own rule or advisory id" },
-        "fix": { "type": "string" },
-        "ids": { "type": "array", "items": { "type": "string" } },
-        "cwe": { "type": "array", "items": { "type": "string" } },
+        "id": {
+          "type": "string",
+          "description": "Content hash of project, source, kind, rule, location, line and message; unique within a report"
+        },
+        "proj": {
+          "type": "string"
+        },
+        "src": {
+          "enum": [
+            "SonarQube",
+            "Snyk",
+            "Trivy",
+            "Semgrep",
+            "Dependabot",
+            "ClamAV",
+            "GuardDog"
+          ]
+        },
+        "by": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "kind": {
+          "type": "string"
+        },
+        "sev": {
+          "type": "string"
+        },
+        "rank": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "msg": {
+          "type": "string"
+        },
+        "loc": {
+          "type": "string",
+          "description": "File path, or package@version"
+        },
+        "line": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        },
+        "ref": {
+          "type": "string",
+          "description": "The tool's own rule or advisory id"
+        },
+        "fix": {
+          "type": "string"
+        },
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwe": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "also": {
           "type": "array",
           "description": "Other sightings merged into this row",
           "items": {
             "type": "object",
             "properties": {
-              "src": { "type": "string" }, "kind": { "type": "string" }, "ref": { "type": "string" },
-              "loc": { "type": "string" }, "line": { "type": ["integer", "string"] }
+              "src": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "sev": {
+                "type": "string"
+              },
+              "msg": {
+                "type": "string"
+              },
+              "loc": {
+                "type": "string"
+              },
+              "ref": {
+                "type": "string"
+              },
+              "fix": {
+                "type": "string"
+              },
+              "line": {
+                "type": [
+                  "integer",
+                  "string"
+                ]
+              },
+              "ids": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "cwe": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             }
           }
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "security": {
+          "type": "boolean"
         }
       }
     }

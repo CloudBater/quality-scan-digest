@@ -23,7 +23,15 @@
    },
    "semgrep": "semgrep.json",
    "dependabot": "dependabot.json",
-   "coverage": "coverage.xml"
+   "coverage": "coverage.xml",
+   "clamav": "clamav.txt",
+   "guarddog": {
+    "requirements.txt": {
+     "path": "guarddog.json",
+     "ecosystem": "pypi",
+     "manifest": "requirements.txt"
+    }
+   }
   }
  ]
 }

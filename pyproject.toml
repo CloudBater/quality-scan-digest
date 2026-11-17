@@ -1,21 +1,25 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "quality-scan-digest"
 dynamic = ["version"]
-description = "Run SonarQube, Snyk, Trivy, Semgrep and Dependabot, deduplicate across them, and export one JSON report."
+description = "Run SonarQube, Snyk, Trivy, Semgrep, Dependabot, ClamAV and GuardDog, deduplicate across them, and export one JSON report."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = []
 classifiers = [
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Topic :: Security",
   "Topic :: Software Development :: Quality Assurance",
 ]
+
+[project.urls]
+Homepage = "https://github.com/CloudBater/quality-scan-digest"
+Issues = "https://github.com/CloudBater/quality-scan-digest/issues"
 
 [project.scripts]
 qsd = "qsd.cli:main"

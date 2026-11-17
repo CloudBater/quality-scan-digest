@@ -1,0 +1,2 @@
+# qsd clamav native
+./sub/eicar.com: Eicar-Test-Signature FOUND

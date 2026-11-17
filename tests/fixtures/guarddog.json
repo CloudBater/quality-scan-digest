@@ -1,0 +1,39 @@
+[
+ {
+  "dependency": "evilpkg",
+  "version": "0.0.1",
+  "result": {
+   "issues": 2,
+   "errors": {},
+   "results": {
+    "typosquatting": "This package closely resembles requests",
+    "threat-network-exfiltration": [
+     {
+      "location": "evilpkg/__init__.py:3",
+      "code": "requests.post(...)",
+      "message": "Sends environment variables to a remote host"
+     }
+    ],
+    "capability-process-spawn": {}
+   }
+  }
+ },
+ {
+  "dependency": "six",
+  "version": "1.16.0",
+  "result": {
+   "issues": 1,
+   "errors": {},
+   "results": {
+    "capability-process-spawn": [
+     {
+      "location": "six.py:735",
+      "code": "exec(...)",
+      "message": "Detects process execution and spawning"
+     }
+    ],
+    "typosquatting": null
+   }
+  }
+ }
+]

@@ -1,28 +1,33 @@
-"""Collapse the same problem reported more than once into one row.
+"""Collapse the same problem reported by more than one scanner into one row.
 
-Five scanners overlap: Snyk, Semgrep Supply Chain, Trivy and Dependabot all read
-dependency advisories, and SonarQube, Snyk Code and Semgrep Code all do SAST.
-Reporting every sighting would double or triple the headline counts, so each
-group of sightings becomes one row whose `by` lists every scanner that saw it.
+Snyk, Semgrep Supply Chain, Trivy and Dependabot read the same advisory
+databases, so one vulnerable package can arrive three or four times. Each group
+of sightings becomes one row whose `by` lists every scanner that saw it, and
+whose `also` keeps every other sighting in full, so nothing is lost.
 
-Three passes, each conservative on purpose (a wrong merge hides a finding; a
-missed merge only over-counts):
+Every pass is conservative on purpose: a wrong merge hides a finding, a missed
+merge only over-counts.
 
-1. exact     same project, source, rule, location, line and message
-2. advisory  same project, a shared CVE/GHSA id, and the same package
-             (or a package unknown on one side)
-3. sast      same project, file and line, and a shared CWE
+  exact     same project, source, kind, rule, location, line and message
+  advisory  same project and package (ecosystem-aware) and a shared CVE/GHSA id.
+            Rows with no package never bridge two packages.
+  sast      OFF by default. Same project, file, line and CWE, reported by
+            DIFFERENT scanners; each row joins at most one group, so findings
+            never chain into each other.
 
-Nothing is merged across projects. Misconfiguration rules (Snyk IaC vs Trivy)
-use unrelated rule catalogues with no shared id, so they are never merged.
+Nothing is merged across projects (keyed by project id, not display label).
 """
 
 from .model import rank
 
-# Which row survives as the primary when a group merges: the richest metadata first.
-SOURCE_PREFERENCE = ("Snyk", "Semgrep", "SonarQube", "Trivy", "Dependabot")
+# Which sighting becomes the primary row of a group: the richest metadata first.
+SOURCE_PREFERENCE = ("Snyk", "Semgrep", "SonarQube", "Trivy", "Dependabot", "GuardDog", "ClamAV")
 
-CODE_KINDS = {"Code", "Vulnerability", "Security Hotspot", "Bug", "Code Smell"}
+CODE_KINDS = {"Vulnerability", "Security Hotspot", "Bug", "Code Smell"}
+DEFAULT_PASSES = ("exact", "advisory")
+ALL_PASSES = ("exact", "advisory", "sast")
+
+_SIGHTING = ("src", "kind", "sev", "msg", "loc", "line", "ref", "fix", "ids", "cwe")
 
 
 class _UF:
@@ -37,10 +42,8 @@ class _UF:
 
     def union(self, a, b):
         ra, rb = self.find(a), self.find(b)
-        if ra == rb:
-            return False
-        self.p[max(ra, rb)] = min(ra, rb)
-        return True
+        if ra != rb:
+            self.p[max(ra, rb)] = min(ra, rb)
 
 
 def _pref(row):
@@ -62,11 +65,12 @@ def _merge(group):
     primary["cwe"] = sorted({c for r in group for c in r.get("cwe", [])})
     # The most severe opinion wins: under-stating a merged finding is the worse error.
     primary["sev"] = min((r["sev"] for r in group), key=rank)
+    primary["security"] = any(r.get("security") for r in group)
     if not primary.get("fix"):
         primary["fix"] = next((r["fix"] for r in group if r.get("fix")), "")
     also = list(primary.get("also") or [])
     for r in group[1:]:
-        also.append({k: r.get(k, "") for k in ("src", "kind", "ref", "loc", "line")})
+        also.append({k: r.get(k, "") for k in _SIGHTING})
         also.extend(r.get("also") or [])
     primary["also"] = also
     return primary
@@ -89,7 +93,7 @@ def _norm_path(p):
 def exact(rows):
     uf, first = _UF(len(rows)), {}
     for i, r in enumerate(rows):
-        key = (r["proj"], r["src"], r["kind"], r["ref"], r["loc"], str(r["line"]), r["msg"])
+        key = (r["project_id"], r["src"], r["kind"], r["ref"], r["loc"], str(r["line"]), r["msg"])
         if key in first:
             uf.union(first[key], i)
         else:
@@ -97,45 +101,65 @@ def exact(rows):
     return _apply(rows, uf)
 
 
+def _pkg_key(r):
+    return (r["project_id"], r.get("_eco", ""), r.get("_package", ""))
+
+
+def _compatible(a, b):
+    """Same package, and the same ecosystem when both rows know theirs."""
+    if a[0] != b[0] or a[2] != b[2]:
+        return False
+    return not a[1] or not b[1] or a[1] == b[1]
+
+
 def advisory(rows):
-    uf, by_id = _UF(len(rows)), {}
-    for i, r in enumerate(rows):
-        for adv in r.get("ids") or ():
-            by_id.setdefault((r["proj"], adv), []).append(i)
-    for members in by_id.values():
-        by_pkg, unknown = {}, []
-        for i in members:
-            pkg = rows[i].get("_package", "")
-            (by_pkg.setdefault(pkg, []) if pkg else unknown).append(i)
-        for same in by_pkg.values():
-            for i in same[1:]:
-                uf.union(same[0], i)
-        # A sighting with no package joins only when the id names one package;
-        # otherwise it would bridge two different packages into one row.
-        if unknown and len(by_pkg) <= 1:
-            anchor = next(iter(by_pkg.values()))[0] if by_pkg else unknown[0]
-            for i in unknown:
-                uf.union(anchor, i)
+    uf = _UF(len(rows))
+    known = [i for i, r in enumerate(rows) if r.get("ids") and r.get("_package")]
+    unknown = [i for i, r in enumerate(rows) if r.get("ids") and not r.get("_package")]
+
+    # 1. Rows that name a package merge only with rows naming the same package.
+    by_id = {}
+    for i in known:
+        for adv in rows[i]["ids"]:
+            for j in by_id.get((rows[i]["project_id"], adv), []):
+                if _compatible(_pkg_key(rows[i]), _pkg_key(rows[j])):
+                    uf.union(i, j)
+            by_id.setdefault((rows[i]["project_id"], adv), []).append(i)
+
+    # 2. A row with no package joins only if every id it carries leads to one
+    #    and the same package group; otherwise it stays on its own.
+    for i in unknown:
+        roots = set()
+        for adv in rows[i]["ids"]:
+            for j in by_id.get((rows[i]["project_id"], adv), []):
+                roots.add(uf.find(j))
+        if len(roots) == 1:
+            uf.union(i, roots.pop())
     return _apply(rows, uf)
 
 
 def sast(rows):
-    uf, seen = _UF(len(rows)), {}
+    uf, groups = _UF(len(rows)), {}
     for i, r in enumerate(rows):
         if r["kind"] not in CODE_KINDS or not r.get("cwe") or not r["line"]:
             continue
-        for c in r["cwe"]:
-            key = (r["proj"], _norm_path(r["loc"]), str(r["line"]), c)
-            if key in seen:
-                uf.union(seen[key], i)
-            else:
-                seen[key] = i
+        keys = [(r["project_id"], _norm_path(r["loc"]), str(r["line"]), c) for c in r["cwe"]]
+        # Cross-tool only, and each row belongs to exactly one group: no chains.
+        target = next((k for k in keys if k in groups
+                       and all(rows[m]["src"] != r["src"] for m in groups[k])), None)
+        if target is not None:
+            uf.union(groups[target][0], i)
+            groups[target].append(i)
+        else:
+            free = next((k for k in keys if k not in groups), None)
+            if free is not None:
+                groups[free] = [i]
     return _apply(rows, uf)
 
 
-def dedup(rows, passes=("exact", "advisory", "sast")):
+def dedup(rows, passes=DEFAULT_PASSES):
     """Run the passes in order. Returns (rows, stats)."""
-    stats = {"input": len(rows)}
+    stats = {"input": len(rows), "passes": list(passes)}
     fns = {"exact": exact, "advisory": advisory, "sast": sast}
     for name in passes:
         before = len(rows)
