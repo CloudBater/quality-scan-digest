@@ -14,8 +14,6 @@ import re
 import shlex
 import unicodedata
 
-from .model import is_malware
-
 MAX_BYTES = 256 * 1024
 VERBS = ("ignore", "track")
 SOURCES = {"SonarQube", "Snyk", "Trivy", "Semgrep", "Dependabot", "ClamAV", "GuardDog", "Gitleaks",
@@ -108,6 +106,30 @@ def _glob(pattern):
     return re.compile("".join(out), re.DOTALL)
 
 
+def _strip_comment(raw):
+    """Cut the line at a `#` that starts a word outside quotes.
+
+    shlex's own comment handling also cuts at a `#` inside a word, so a ticket like `org/repo#12`
+    would silently drop everything after it, `expect=` included.
+    """
+    quote, i = None, 0
+    while i < len(raw):
+        c = raw[i]
+        if quote:
+            if c == "\\" and quote == '"':
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c == "\\":
+            i += 1
+        elif c in "'\"":
+            quote = c
+        elif c == "#" and (i == 0 or raw[i - 1].isspace()):
+            return raw[:i]
+        i += 1
+    return raw
+
+
 def _fail(line, message):
     raise WaiverError(f"waiver file line {line}: {message}")
 
@@ -117,7 +139,7 @@ def parse(text, today):
     out = []
     for n, raw in enumerate(text.splitlines(), 1):
         try:
-            tokens = shlex.split(raw, comments=True)
+            tokens = shlex.split(_strip_comment(raw), comments=False)
         except ValueError as exc:
             _fail(n, f"cannot read the line ({exc})")
         if not tokens:
@@ -155,6 +177,11 @@ def parse(text, today):
             _fail(n, f"until is more than 12 months away (latest {_latest(today)}); "
                      f"a waiver must be renewed, not left forever")
         fields["until"] = until
+        stars = lambda k: k in fields and re.fullmatch(r"[*?]+", fields[k])  # noqa: E731
+        if not ("src" in fields or "track" in fields
+                or ("ref" in fields and not stars("ref")) or ("loc" in fields and not stars("loc"))):
+            if "expect" not in fields:
+                _fail(n, "a line that matches everything (ref/loc made only of * or ?) needs expect=N")
         if "src" in fields and fields["src"] not in SOURCES:
             _fail(n, f"src {fields['src']!r} is not a scanner; use one of {', '.join(sorted(SOURCES))}")
         if "ticket" in fields and not _TICKET.match(fields["ticket"]):
@@ -185,6 +212,22 @@ def load(path, today):
     return parse(text, today), hashlib.sha256(data).hexdigest()
 
 
+def _violation(w, picked):
+    for r in picked:
+        kinds = {r.get("kind"), *(a.get("kind") for a in r.get("also") or [])}
+        looks_secret = any(_SECRET_LIKE.search(v or "") for v in
+                           [r.get("ref"), r.get("msg"),
+                            *(x for a in r.get("also") or [] for x in (a.get("ref"), a.get("msg")))])
+        if (kinds & STRICT_KINDS or looks_secret) and w.track is None:
+            return (f"a pattern reaches the {'/'.join(sorted(kinds & STRICT_KINDS)) or 'secret-like'} "
+                    f"finding {r.get('track')} ({r.get('loc')}); secrets and malware can only be "
+                    f"waived one by one, with track=<its track key>")
+        if r.get("rank", 5) <= 1 and not w.ticket:
+            return (f"it covers the {r['sev']} finding {r.get('track')} ({r.get('ref')} "
+                    f"{r.get('loc')}); HIGH and above need ticket=")
+    return None
+
+
 def apply(rows, waivers, today):
     """Tag rows with `waiver` (None when none applies) and return the report block's pieces.
 
@@ -192,8 +235,8 @@ def apply(rows, waivers, today):
     selects only already-owned rows is reported as stale. A line that is expired, or that
     selects more rows than its `expect`, waives nothing, so the findings come back, and it is
     listed in `errors` (a strict run exits 2 on them). A line that selects nothing is `stale`.
-    Policy violations raise WaiverError: a pattern that reaches a secret or malware row, or an
-    `ignore` of a HIGH-or-above finding without a ticket.
+    A policy violation (a pattern that reaches a secret or malware row, or an `ignore` of a
+    HIGH-or-above finding without a ticket) is an error on that line, which then waives nothing.
     """
     for r in rows:
         r["waiver"] = None
@@ -204,22 +247,13 @@ def apply(rows, waivers, today):
                           f"its findings are counted unless another line covers them")
             continue
         picked = [r for r in rows if r["waiver"] is None and w.selects(r)]
-        for r in picked:
-            kinds = {r.get("kind"), *(a.get("kind") for a in r.get("also") or [])}
-            looks_secret = any(_SECRET_LIKE.search(v or "") for v in
-                               [r.get("ref"), r.get("msg"),
-                                *(x for a in r.get("also") or [] for x in (a.get("ref"), a.get("msg")))])
-            if kinds & STRICT_KINDS or is_malware(r) or looks_secret:
-                if w.track is None:
-                    raise WaiverError(
-                        f"waiver file line {w.line}: a pattern reaches the "
-                        f"{'/'.join(sorted(kinds & STRICT_KINDS)) or 'secret-like'} finding "
-                        f"{r.get('track')} ({r.get('loc')}); secrets and malware can only be waived "
-                        f"one by one, with track=<its track key>")
-            if r.get("rank", 5) <= 1 and not w.ticket:
-                raise WaiverError(
-                    f"waiver file line {w.line}: it covers the {r['sev']} finding {r.get('track')} "
-                    f"({r.get('ref')} {r.get('loc')}); HIGH and above need ticket=")
+        # What a line covers depends on the scanned code, so a violation is an error on the line
+        # (it waives nothing, a strict run exits 2), never a reason to write no report.
+        violation = _violation(w, picked)
+        if violation:
+            errors.append(f"line {w.line}: {violation}; it waives none until the file is fixed")
+            w.matched = len(picked)
+            continue
         if w.expect is not None and len(picked) > w.expect:
             errors.append(f"line {w.line}: selects {len(picked)} findings but expect={w.expect}; "
                             f"it waives none itself until the file is reviewed")

@@ -141,11 +141,12 @@ track  ref=GHSA-xxxx-xxxx-xxxx loc="*: example-package@1.2.3" ticket=PROJ-123 un
 
 - **被豁免的問題不會消失。** 它仍在 `findings` 裡，附上 `waiver`（`status`、`reason`、`ticket`、`until`、`line`）。
 - **每一行都要有 `reason` 與 `until` 日期**，最多 12 個月後。過期後問題重新計入，strict 模式會以 exit 2 失敗。
-- **HIGH 以上需要 `ticket`**，所有 `track` 也一樣。
+- **HIGH 以上需要 `ticket`**，所有 `track` 也一樣。違反這條或下面的機密規則的行，會變成該行的錯誤：它一筆都不豁免，strict 模式以 exit 2 失敗，但報告仍會產出（被掃描的程式碼不能靠新增問題讓報告消失）。
+- **匹配全部的行**（`ref` 或 `loc` 只有 `*` 或 `?`，又沒有 `src` 或 `track`）必須帶 `expect=N`。
 - **`expect=N`**：這一行若匹配超過 N 筆，就一筆也不豁免，strict 模式以 exit 2 失敗，避免「忽略這條規則」日後悄悄蓋住新的真問題。
 - **機密與惡意程式**只能逐筆用 `track=<該問題的 track>` 豁免，不能用規則樣式。這包括合併了其他掃描器回報的列，以及規則或訊息看起來像機密（secret、password、token、API key、credential、private key、hard-coded）的問題，不論該掃描器把它歸為哪一類。`src=` 只有在沒有其他掃描器也看到同一列時才會豁免它。
 - **過時的行**（沒匹配到任何東西）列在 `waivers.stale`；檔案的 SHA-256 會記錄在報告裡。
-- 比對條件：`src`、`ref`（規則或通報編號）、`loc`（路徑或 `package@version`）、`project`（專案名稱）、以及精確的 `track`。在 `ref` 與 `loc` 裡，`*` 與 `?` 只在同一層路徑內比對，`**` 可跨越 `/`，其他字元（包含 `[`）都是字面意思。不用行號，因為行號會漂移。`until` 是 UTC 日期，當天仍有效。
+- 比對條件：`src`、`ref`（規則或通報編號）、`loc`（路徑或 `package@version`）、`project`（專案 `name`，不是顯示用的 label）、以及精確的 `track`。在 `ref` 與 `loc` 裡，`*` 與 `?` 只在同一層路徑內比對，`**` 可跨越 `/`，其他字元（包含 `[`）都是字面意思。不用行號，因為行號會漂移。位置依掃描器回報的原樣比對（Semgrep 回報 `./app/x.py`，所以要寫 `loc="**/x.py"` 或 `loc="./app/**"`）。`until` 是 UTC 日期，當天仍有效。`#` 只有在字的開頭才算註解，所以 `ticket=org/repo#12` 沒問題。
 - **檔案絕不會從被掃描的 checkout 讀取**，`ignore_file` 放在 checkout 內會被拒絕；否則 pull request 可以替自己的問題開豁免。請放在擁有掃描設定、由資安負責人審核的 repo。
 
 它不取代各工具自己的抑制功能（那些計入 `sources.*.suppressed`）。

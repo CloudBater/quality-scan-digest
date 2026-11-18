@@ -185,7 +185,8 @@ def render(payload):
     if wb:
         untracked = sum(s.get("untracked_crit_high") or 0 for s in summaries)
         sec += "".join([
-            _tile("Untracked crit + high", untracked, "bad" if untracked else clean_ok),
+            _tile("Untracked crit + high", untracked,
+                  "bad" if untracked else ("ok" if not gaps and not partial_sources else "")),
             _tile("Tracked (have a ticket)", sum(s.get("tracked") or 0 for s in summaries)),
             _tile("Ignored by waiver file", sum(s.get("waived") or 0 for s in summaries)),
         ])

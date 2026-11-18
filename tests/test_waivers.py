@@ -134,9 +134,12 @@ class Review(unittest.TestCase):
 
     def test_a_merged_row_with_a_malicious_sighting_cannot_be_waived_by_pattern(self):
         row = synth(also=[{"src": "OSV-Scanner", "kind": "Malicious Package", "sev": "CRITICAL"}])
-        with self.assertRaises(waivers.WaiverError):
-            self.apply(f"ignore ref=R-* {OK} ticket=P-1\n", [row])
-        self.apply(f"ignore track=t1 {OK} ticket=P-1\n", [synth(also=row["also"])])   # exact key: fine
+        errors, _ = self.apply(f"ignore ref=R-* {OK} ticket=P-1\n", [row])
+        self.assertIsNone(row["waiver"])
+        self.assertIn("one by one", errors[0])
+        ok = synth(also=row["also"])
+        self.apply(f"ignore track=t1 {OK} ticket=P-1\n", [ok])         # exact key: fine
+        self.assertEqual(ok["waiver"]["status"], "ignore")
 
     def test_the_cap_is_twelve_calendar_months(self):
         waivers.parse("ignore ref=x reason=r until=2027-11-18\n", TODAY)
@@ -175,17 +178,18 @@ class Review(unittest.TestCase):
 
     def test_a_secret_reported_under_another_kind_needs_its_exact_key_too(self):
         # Trivy DS-0031 ("secret in ENV") is a Misconfiguration; the fixture has one.
-        with self.assertRaises(waivers.WaiverError) as cm:
-            build(f"ignore src=Trivy ref=DS-0031 {OK} ticket=P-1\n")
-        self.assertIn("one by one", str(cm.exception))
+        p = build(f"ignore src=Trivy ref=DS-0031 {OK} ticket=P-1\n")
+        self.assertIsNone(by_ref(p, "DS-0031")[0]["waiver"])
+        self.assertIn("one by one", p["waivers"]["errors"][0])
         key = by_ref(build(""), "DS-0031")[0]["track"]
         self.assertEqual(by_ref(build(f"ignore track={key} {OK} ticket=P-1\n"), "DS-0031")[0]
                          ["waiver"]["status"], "ignore")
         for row in (synth(kind="Vulnerability", ref="rules.hardcoded-password"),
                     synth(kind="Code Smell", msg="Hard-coded API key", ref="S2068"),
                     synth(also=[{"src": "Semgrep", "kind": "Vulnerability", "msg": "leaked token"}])):
-            with self.assertRaises(waivers.WaiverError, msg=str(row)):
-                self.apply(f"ignore src=Snyk {OK} ticket=P-1\n", [row])
+            errors, _ = self.apply(f"ignore src=Snyk {OK} ticket=P-1\n", [row])
+            self.assertIsNone(row["waiver"], str(row))
+            self.assertTrue(errors, str(row))
 
     def test_star_stays_inside_one_path_segment_and_double_star_crosses(self):
         def matches(pattern, loc):
@@ -227,6 +231,56 @@ class Review(unittest.TestCase):
         with open(os.path.join(FIX, "..", "..", "schema", "report.schema.json")) as fh:
             schema = json.load(fh)
         jsonschema.validate(json.loads(json.dumps(build_payload(load_manifest()))), schema)
+
+    def test_a_hash_inside_a_value_does_not_cut_the_line(self):
+        (w,) = waivers.parse('ignore src=Semgrep ref=x reason=r until=2027-05-01 '
+                             'ticket=acme/api#123 loc="app/io.py" expect=1\n', TODAY)
+        self.assertEqual((w.ticket, w.loc, w.expect), ("acme/api#123", "app/io.py", 1))
+        (w,) = waivers.parse('ignore ref=x reason=r until=2027-05-01 '
+                             'ticket=https://h/o/r/issues/5#issuecomment-1 expect=3\n', TODAY)
+        self.assertEqual(w.expect, 3)
+        # Comments still work: at the start of a line, after a space, and quotes protect a #.
+        (w,) = waivers.parse(f'ignore ref="a #b" {OK} # trailing\n', TODAY)
+        self.assertEqual(w.ref, "a #b")
+        self.assertEqual(waivers.parse(f"   # whole line\n", TODAY), [])
+
+    def test_the_hash_case_cannot_widen_a_waiver_over_a_high_finding(self):
+        p = build('ignore src=Semgrep reason="fp" until=2027-05-01 ticket=https://x/5#c '
+                  'loc="app/io.py" expect=1\n')
+        self.assertEqual(p["generated_from"][0]["waived"], 1)          # only the MEDIUM row
+
+    def test_scanned_code_cannot_stop_the_report_by_adding_a_finding(self):
+        # A valid line that, after a new HIGH finding or a secret-like message, would cover it.
+        rows = [synth(rank=2, sev="MEDIUM", track="a"), synth(rank=1, sev="HIGH", track="b")]
+        errors, block = self.apply(f"ignore src=Snyk {OK} expect=5\n", rows)       # no ticket
+        self.assertEqual([r["waiver"] for r in rows], [None, None])
+        self.assertIn("HIGH and above need ticket=", errors[0])
+        self.assertEqual(block["errors"], errors)
+
+    def test_a_line_that_matches_everything_needs_expect(self):
+        for m in ("loc=**", "ref=*", "loc=* ref=**"):
+            with self.assertRaises(waivers.WaiverError, msg=m):
+                waivers.parse(f"ignore {m} {OK} ticket=P-1\n", TODAY)
+        waivers.parse(f"ignore loc=** {OK} ticket=P-1 expect=500\n", TODAY)
+        waivers.parse(f"ignore src=Semgrep loc=** {OK}\n", TODAY)            # narrowed by src
+
+    def test_ignore_file_must_be_a_path_string(self):
+        from qsd.report import ManifestError
+        for bad in (3, True, ["x"], {"a": 1}, ""):
+            m = load_manifest()
+            m["ignore_file"] = bad
+            with self.assertRaises(ManifestError, msg=repr(bad)):
+                build_payload(m, today=TODAY)
+
+    def test_stale_never_lists_an_expired_line(self):
+        p = build(f"ignore ref=NO-SUCH reason=r until=2026-11-01\n")
+        self.assertEqual((p["waivers"]["stale"], p["waivers"]["expired"]), ([], [1]))
+
+    def test_the_untracked_tile_is_not_red_at_zero(self):
+        ids = [r["track"] for r in build("")["findings"] if r["security"] and r["rank"] <= 1]
+        page = render(build("".join(f"track track={t} reason=r until=2027-05-01 ticket=P-1\n"
+                                    for t in ids)))
+        self.assertRegex(page, r'<div class="tile "><b>0</b><span>Untracked crit')
 
     def test_an_exact_expect_applies_the_waiver(self):
         p = build(f"ignore src=Semgrep {OK} ticket=P-1 expect=2\n")
@@ -364,17 +418,19 @@ class Apply(unittest.TestCase):
         self.assertEqual(sum(1 for r in p["findings"] if r["waiver"]), 1)
 
     def test_high_and_above_need_a_ticket(self):
-        with self.assertRaises(waivers.WaiverError) as cm:
-            build(f"ignore {HIGH_IAC} {OK}\n")
-        self.assertIn("ticket", str(cm.exception))
-        self.assertIn("line 1", str(cm.exception))
-        build(f"ignore {HIGH_IAC} {OK} ticket=P-1\n")                # with one: fine
+        p = build(f"ignore {HIGH_IAC} {OK}\n")                     # no ticket: an error, nothing waived
+        self.assertIsNone(by_ref(p, "SNYK-CC-K8S-1")[0]["waiver"])
+        self.assertIn("HIGH and above need ticket=", p["waivers"]["errors"][0])
+        self.assertIn("line 1", p["waivers"]["errors"][0])
+        q = build(f"ignore {HIGH_IAC} {OK} ticket=P-1\n")           # with one: fine
+        self.assertEqual(q["waivers"]["errors"], [])
+        self.assertEqual(by_ref(q, "SNYK-CC-K8S-1")[0]["waiver"]["status"], "ignore")
 
     def test_a_pattern_cannot_waive_a_secret_or_malware_only_its_exact_key_can(self):
         for ref in ("github-pat", "Eicar-Test-Signature", "MAL-2099-1"):
-            with self.assertRaises(waivers.WaiverError, msg=ref) as cm:
-                build(f"ignore ref={ref} {OK} ticket=P-1\n")
-            self.assertIn("one by one", str(cm.exception))
+            p = build(f"ignore ref={ref} {OK} ticket=P-1\n")
+            self.assertIsNone(by_ref(p, ref)[0]["waiver"], ref)
+            self.assertIn("one by one", p["waivers"]["errors"][0], ref)
         base = build("")
         key = by_ref(base, "github-pat")[0]["track"]
         p = build(f"ignore track={key} {OK} ticket=P-1\n")
@@ -482,6 +538,26 @@ class Containment(unittest.TestCase):
             validate_config(self.config(base, swapped), base)
 
 
+    def test_a_project_below_the_repository_root_counts_the_whole_repository(self):
+        base = tempfile.mkdtemp()
+        os.makedirs(os.path.join(base, "repo", "services", "api"))
+        subprocess.run(["git", "init", "-q", os.path.join(base, "repo")], check=True)
+        open(os.path.join(base, "repo", ".qsdignore"), "w").close()
+        with self.assertRaises(ConfigError) as cm:
+            validate_config({"projects": [{"name": "api", "path": "repo/services/api"}],
+                             "ignore_file": "repo/.qsdignore"}, base)
+        self.assertIn("inside the scanned checkout", str(cm.exception))
+
+    def test_a_bad_waiver_file_fails_in_validate_before_any_scanner_runs(self):
+        base = tempfile.mkdtemp()
+        os.makedirs(os.path.join(base, "repo"))
+        bad = os.path.join(base, "owner.qsdignore")
+        with open(bad, "w") as fh:
+            fh.write("ignore nonsense\n")
+        with self.assertRaises(waivers.WaiverError):
+            validate_config({"projects": [{"name": "api", "path": "repo"}], "ignore_file": bad}, base)
+
+
 class Output(unittest.TestCase):
     def test_the_html_lists_waived_rows_in_their_own_section_and_tiles(self):
         p = build(f"ignore {SMELL} {OK} expect=1\ntrack {HIGH_IAC} {OK} ticket=P-9\n")
@@ -562,6 +638,29 @@ class Cli(unittest.TestCase):
             self.assertIn("waiver error", r.stderr)
         self.assertIn("waiver problem", r.stderr + self.run_cli(
             "digest", manifest, "--json-out", out, "--ignore-file", tmpfile(text), "--strict").stderr)
+
+    def test_an_expired_line_fails_a_strict_run(self):
+        out = os.path.join(tempfile.mkdtemp(), "r.json")
+        text = f"ignore {SMELL} reason=r until=2026-01-01\n"
+        r = self.run_cli("digest", self.complete_manifest(), "--json-out", out, "--ignore-file",
+                         tmpfile(text), "--strict")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("expired", r.stderr)
+        with open(out) as fh:                                    # the report is still written
+            self.assertEqual(json.load(fh)["generated_from"][0]["waived"], 0)
+
+    def test_the_cli_never_discovers_a_waiver_file_in_the_working_directory(self):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, ".qsdignore"), "w") as fh:
+            fh.write(f"ignore {SMELL} {OK}\n")
+        out = os.path.join(d, "r.json")
+        env = dict(os.environ, PYTHONPATH=os.path.join(os.path.dirname(__file__), "..", "src"))
+        r = subprocess.run([sys.executable, "-m", "qsd", "digest", self.complete_manifest(),
+                            "--json-out", out, "--lenient"], cwd=d, capture_output=True, text=True,
+                           env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(out) as fh:
+            self.assertIsNone(json.load(fh)["waivers"])
 
     def test_strict_passes_with_a_healthy_waiver_file(self):
         out = os.path.join(tempfile.mkdtemp(), "r.json")

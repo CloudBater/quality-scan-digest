@@ -69,7 +69,7 @@ an error.
   rule" from quietly hiding new, real findings later.
 - **Expiry is mandatory.** An expired waiver stops applying and the finding returns.
 - **Stale lines are reported**, not silently kept: a line that matched nothing this run is listed.
-- **Malware cannot be waived by pattern.** Secrets only by exact fingerprint. The highest-risk
+- **Malware cannot be waived by pattern.** Secrets only by the exact `track` key. The highest-risk
   categories need a deliberate, individual decision.
 - **HIGH and above need a `ticket`.**
 - The waiver file's **SHA-256** is recorded in the report, so the numbers are traceable to the exact

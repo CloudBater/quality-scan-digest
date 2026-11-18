@@ -25,6 +25,7 @@ import urllib.request
 from importlib import resources
 
 from .model import safe_name
+from .waivers import load as waiver_load
 from .parsers.sonarqube import MEASURE_KEYS, Forbidden, SonarError, api, fetch_all, waived_count
 
 TOOLS = ("sonarqube", "snyk", "trivy", "semgrep", "dependabot", "osv", "zizmor", "clamav",
@@ -241,6 +242,20 @@ def _is_inside(path, root):
         here = parent
 
 
+def _roots(path):
+    """The project directory, and the top of the git checkout it sits in (a project can be a
+    subdirectory of a repository whose other files a pull request can change too)."""
+    out = [path]
+    try:
+        top = subprocess.run(["git", "-C", path, "rev-parse", "--show-toplevel"], capture_output=True,
+                             text=True, timeout=20).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        top = ""
+    if top:
+        out.append(top)
+    return out
+
+
 def validate(config, base):
     projects = config.get("projects")
     if not isinstance(projects, list) or not projects:
@@ -271,8 +286,10 @@ def validate(config, base):
         where = os.path.realpath(os.path.join(base, ignore))
         if not os.path.isfile(where):
             raise ConfigError(f"ignore_file {ignore!r} is not a file")
+        # Parsed now, so a bad file fails before any scanner runs.
+        waiver_load(where, _dt.datetime.now(_dt.timezone.utc).date())
         for p in projects:
-            if _is_inside(where, os.path.join(base, p["path"])):
+            if any(_is_inside(where, root) for root in _roots(os.path.join(base, p["path"]))):
                 raise ConfigError(f"ignore_file is inside the scanned checkout of {p['name']!r}; "
                                   f"a change to that code could then waive its own findings. "
                                   f"Keep it in the repository that owns the scan configuration.")

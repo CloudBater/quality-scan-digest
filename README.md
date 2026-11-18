@@ -200,7 +200,11 @@ security findings of CRITICAL or HIGH with neither a waiver nor a ticket.
   (`status`, `reason`, `ticket`, `until`, `line`).
 - **Every line has a `reason` and an `until` date**, at most 12 months ahead. After it the finding
   counts again, and a strict run exits 2.
-- **HIGH and above need a `ticket`**, and so does every `track`.
+- **HIGH and above need a `ticket`**, and so does every `track`. A line that breaks this or the
+  secrets rule below is an error on that line: it waives nothing and a strict run exits 2, but the
+  report is still written (new code in the scanned repository cannot stop the report).
+- **A line that matches everything** (`ref` or `loc` made only of `*` or `?`, with no `src` or
+  `track`) must carry `expect=N`.
 - **`expect=N`**: if the line ever matches more than N findings it waives none of them and a strict
   run exits 2, so "ignore this rule" cannot quietly cover new, real findings.
 - **Secrets and malware** can only be waived one by one, with `track=<the finding's track key>`,
@@ -210,11 +214,15 @@ security findings of CRITICAL or HIGH with neither a waiver nor a ticket.
   scanner also saw it.
 - **Stale lines** (matching nothing) are listed in `waivers.stale`. The file's SHA-256 is recorded.
 - Matchers: `src`, `ref` (rule or advisory id), `loc` (path or `package@version`), `project` (the
-  project name), and the exact `track` key. In `ref` and `loc`, `*` and `?` stay inside one path
+  project `name`, not its label), and the exact `track` key. In `ref` and `loc`, `*` and `?` stay inside one path
   segment, `**` crosses `/`, and every other character, `[` included, is literal. No line numbers:
-  they drift. `until` is a UTC date and is still valid on that day.
-- **The file is never read from a scanned checkout**, and `ignore_file` inside one is refused;
-  otherwise a pull request could waive its own finding. Keep it in the repository that owns the
+  they drift. Locations are compared as the scanner reported them (Semgrep reports `./app/x.py`, so
+  write `loc="**/x.py"` or `loc="./app/**"`). `until` is a UTC date and is still valid on that day.
+  A `#` starts a comment only at the start of a word, so `ticket=org/repo#12` is safe.
+- **The file is never read from a scanned checkout**, and for `qsd scan` an `ignore_file` (config
+  key or `--ignore-file`) inside the project directory or the git repository it sits in is refused;
+  otherwise a pull request could waive its own finding. `qsd digest` has no checkout path to compare
+  against, so the file you pass there is trusted. A bad file fails `scan` before any scanner runs. Keep it in the repository that owns the
   scan configuration, reviewed by whoever owns security.
 
 It does not replace the tools' own suppressions (counted under `sources.*.suppressed`).

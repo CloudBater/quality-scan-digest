@@ -19,11 +19,15 @@ All notable changes to this project are documented here. The format follows
   above need a `ticket`; `track` needs one; `expect=N` stops a rule from silently covering new
   findings; a secret or malware finding (including a merged row with one, and a rule or message
   that looks like a secret under any kind) can only be waived by its exact `track` key; `src` does
-  not waive a row another scanner also saw. In `ref` and `loc`, `*` and `?` stay inside one path
+  not waive a row another scanner also saw. A line that breaks one of these rules is an error on
+  that line (it waives nothing and a strict run exits 2); the report is still written. A line that
+  matches everything needs `expect=N`. In `ref` and `loc`, `*` and `?` stay inside one path
   segment, `**` crosses `/`, and `[` is literal. An expired line, or one over its `expect`, waives
   nothing and fails a strict run (exit 2). A line that matches nothing is listed as stale.
-- `ignore_file` is refused when it lies inside a scanned checkout, and is never read from one, so a
-  pull request cannot waive its own finding.
+- For `qsd scan`, `ignore_file` (config key or `--ignore-file`) is refused when it lies inside a
+  scanned project directory or the git repository it sits in, and the file is parsed before any
+  scanner runs. It is never read from a checkout, so a pull request cannot waive its own finding.
+  `qsd digest` has no checkout path and trusts the file it is given.
 
 ### Changed
 - Report schema 1.2: every finding has `waiver` (null when none), each project has `waived`,

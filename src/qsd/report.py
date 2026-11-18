@@ -269,6 +269,8 @@ def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES, today=None):
     today = today or _dt.datetime.now(_dt.timezone.utc).date()
     waiver_list, waiver_sha = [], None
     ignore_file = manifest.get("ignore_file")
+    if ignore_file is not None and (not isinstance(ignore_file, str) or not ignore_file):
+        raise ManifestError("ignore_file must be a path (a non-empty string)")
     if ignore_file:
         # Parsed before any scanner output is read, so a bad file fails fast.
         waiver_list, waiver_sha = _waivers.load(ignore_file, today)
