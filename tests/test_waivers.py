@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
@@ -97,9 +98,8 @@ class Parse(unittest.TestCase):
     def test_the_expiry_is_a_real_date_and_at_most_12_months_away(self):
         self.bad('ignore ref=x reason=r until=2027/05/01\n', "date like")
         self.bad('ignore ref=x reason=r until=2027-02-30\n', "not a real date")
-        limit = TODAY + dt.timedelta(days=366)
-        self.parse(f"ignore ref=x reason=r until={limit}\n")
-        self.bad(f"ignore ref=x reason=r until={limit + dt.timedelta(days=1)}\n", "12 months")
+        self.parse("ignore ref=x reason=r until=2027-11-18\n")
+        self.bad("ignore ref=x reason=r until=2027-11-19\n", "12 months")
 
     def test_expect_is_a_positive_whole_number(self):
         for v in ("0", "-1", "two", "1.5"):
@@ -116,6 +116,89 @@ class Parse(unittest.TestCase):
         with open(os.path.join(FIX, "..", "..", "schema", "report.schema.json")) as fh:
             enum = json.load(fh)["$defs"]["finding"]["properties"]["src"]["enum"]
         self.assertEqual(set(enum), waivers.SOURCES)
+
+
+def synth(**kw):
+    base = {"project_id": "api", "proj": "API", "src": "Snyk", "by": ["Snyk"], "kind": "Dependency",
+            "sev": "CRITICAL", "rank": 0, "ref": "R-1", "ids": [], "loc": "pkg@1", "track": "t1",
+            "also": [], "security": True}
+    base.update(kw)
+    return base
+
+
+class Review(unittest.TestCase):
+    """Findings from the independent reviews of the first version, each reproduced here."""
+
+    def apply(self, text, rows):
+        return waivers.apply(rows, waivers.parse(text, TODAY), TODAY)
+
+    def test_a_merged_row_with_a_malicious_sighting_cannot_be_waived_by_pattern(self):
+        row = synth(also=[{"src": "OSV-Scanner", "kind": "Malicious Package", "sev": "CRITICAL"}])
+        with self.assertRaises(waivers.WaiverError):
+            self.apply(f"ignore ref=R-* {OK} ticket=P-1\n", [row])
+        self.apply(f"ignore track=t1 {OK} ticket=P-1\n", [synth(also=row["also"])])   # exact key: fine
+
+    def test_the_cap_is_twelve_calendar_months(self):
+        waivers.parse("ignore ref=x reason=r until=2027-11-18\n", TODAY)
+        with self.assertRaises(waivers.WaiverError):
+            waivers.parse("ignore ref=x reason=r until=2027-11-19\n", TODAY)
+        leap = dt.date(2028, 2, 29)
+        waivers.parse("ignore ref=x reason=r until=2029-02-28\n", leap)
+        with self.assertRaises(waivers.WaiverError):
+            waivers.parse("ignore ref=x reason=r until=2029-03-01\n", leap)
+
+    def test_expect_accepts_only_ascii_digits_and_never_raises_anything_else(self):
+        for v in ("\u00b2", "\u0663", "9" * 4301, "\uff11"):
+            with self.assertRaises(waivers.WaiverError, msg=repr(v[:8])):
+                waivers.parse(f"ignore ref=x {OK} expect={v}\n", TODAY)
+
+    def test_a_blank_reason_is_refused(self):
+        for r in ('"   "', '"\t"', '"\x00"'):
+            with self.assertRaises(waivers.WaiverError, msg=r):
+                waivers.parse(f"ignore ref=x until=2027-05-01 reason={r}\n", TODAY)
+
+    def test_the_size_limit_holds_even_when_the_reported_size_is_wrong(self):
+        big = tmpfile("#" * (waivers.MAX_BYTES + 1))
+        with mock.patch("os.path.getsize", return_value=0):
+            with self.assertRaises(waivers.WaiverError):
+                waivers.load(big, TODAY)
+
+    def test_project_matches_the_project_id_only(self):
+        rows = [synth(project_id="other", proj="api")]       # another project whose label is "api"
+        self.apply(f"ignore project=api ref=R-1 {OK} ticket=P-1\n", rows)
+        self.assertIsNone(rows[0]["waiver"])
+
+    def test_a_later_line_covering_an_expired_or_over_limit_line_is_said_plainly(self):
+        errors, _ = self.apply("ignore ref=R-1 reason=r until=2026-11-17\n", [synth()])
+        self.assertNotIn("counted again", errors[0])
+        self.assertIn("no longer applies", errors[0])
+
+    def test_an_exact_expect_applies_the_waiver(self):
+        p = build(f"ignore src=Semgrep {OK} ticket=P-1 expect=2\n")
+        self.assertEqual(p["generated_from"][0]["waived"], 2)
+
+    def test_the_malware_tile_does_not_recount_ignored_rows(self):
+        ids = [r["track"] for r in build("")["findings"] if r["kind"] in ("Malware", "Malicious Package")]
+        text = "".join(f"ignore track={t} {OK} ticket=P-1\n" for t in ids)
+        page = render(build(text))
+        self.assertRegex(page, r"<b>0</b><span>Malware / malicious pkgs")
+
+    def test_a_waived_row_still_shows_its_other_sightings_in_the_page(self):
+        page = render(build(f"ignore ref=SNYK-PYTHON-DJANGO-0001 {OK} ticket=P-1\n"))
+        self.assertIn("const sightings = r =>", page)
+        self.assertEqual(page.count("${sightings(r)}"), 2)          # in both tables
+
+    def test_the_schema_requires_the_fields_of_a_waiver_line(self):
+        try:
+            import jsonschema
+        except ImportError:
+            self.skipTest("jsonschema not installed")
+        with open(os.path.join(FIX, "..", "..", "schema", "report.schema.json")) as fh:
+            schema = json.load(fh)
+        doc = json.loads(json.dumps(build(f"ignore {SMELL} {OK}\n")))
+        doc["waivers"]["lines"] = [{}]
+        with self.assertRaises(jsonschema.ValidationError):
+            jsonschema.validate(doc, schema)
 
 
 class Apply(unittest.TestCase):
@@ -309,6 +392,39 @@ class Apply(unittest.TestCase):
         os.symlink(os.path.join(base, "repo", ".qsdignore"), os.path.join(base, "link"))
         with self.assertRaises(ConfigError):
             validate_config({"projects": [{"name": "api", "path": "repo"}], "ignore_file": "link"}, base)
+
+
+class Containment(unittest.TestCase):
+    def config(self, base, ignore):
+        return {"projects": [{"name": "api", "path": "repo"}], "ignore_file": ignore}
+
+    def test_the_cli_flag_is_checked_the_same_way_as_the_config_key(self):
+        base = tempfile.mkdtemp()
+        os.makedirs(os.path.join(base, "repo"))
+        inside = os.path.join(base, "repo", ".qsdignore")
+        open(inside, "w").close()
+        cfg = os.path.join(base, "qsd.json")
+        with open(cfg, "w") as fh:
+            json.dump({"projects": [{"name": "api", "path": "repo"}]}, fh)
+        # No docker or scanner on PATH: were the guard missing, this must still not start a scan.
+        env = dict(os.environ, PYTHONPATH=os.path.join(os.path.dirname(__file__), "..", "src"),
+                   PATH=os.path.dirname(sys.executable) + os.pathsep + "/nonexistent")
+        r = subprocess.run([sys.executable, "-m", "qsd", "scan", cfg, "--ignore-file", inside,
+                            "--out-dir", os.path.join(base, "out")], capture_output=True, text=True,
+                           env=env)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("inside the scanned checkout", r.stderr)
+
+    def test_a_different_spelling_of_the_same_file_is_still_inside(self):
+        base = tempfile.mkdtemp()
+        os.makedirs(os.path.join(base, "repo"))
+        path = os.path.join(base, "repo", "Waivers.TXT")
+        open(path, "w").close()
+        swapped = os.path.join(base, "REPO", "waivers.txt")
+        if not os.path.exists(swapped):
+            self.skipTest("case-sensitive file system")
+        with self.assertRaises(ConfigError):
+            validate_config(self.config(base, swapped), base)
 
 
 class Output(unittest.TestCase):

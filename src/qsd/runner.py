@@ -225,6 +225,22 @@ def _reject_dangerous_sonar_properties(path):
                              f"checkout-supplied program or send the token elsewhere")
 
 
+def _is_inside(path, root):
+    """Whether `path` is `root` or below it, compared by file identity so that letter case on a
+    case-insensitive file system, symlinks and `..` cannot give a different answer."""
+    here = os.path.realpath(path)
+    while True:
+        try:
+            if os.path.samefile(here, root):
+                return True
+        except OSError:
+            pass
+        parent = os.path.dirname(here)
+        if parent == here:
+            return False
+        here = parent
+
+
 def validate(config, base):
     projects = config.get("projects")
     if not isinstance(projects, list) or not projects:
@@ -256,8 +272,7 @@ def validate(config, base):
         if not os.path.isfile(where):
             raise ConfigError(f"ignore_file {ignore!r} is not a file")
         for p in projects:
-            root = os.path.realpath(os.path.join(base, p["path"]))
-            if os.path.commonpath([where, root]) == root:
+            if _is_inside(where, os.path.join(base, p["path"])):
                 raise ConfigError(f"ignore_file is inside the scanned checkout of {p['name']!r}; "
                                   f"a change to that code could then waive its own findings. "
                                   f"Keep it in the repository that owns the scan configuration.")

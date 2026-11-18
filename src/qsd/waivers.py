@@ -17,7 +17,6 @@ import shlex
 from .model import is_malware
 
 MAX_BYTES = 256 * 1024
-MAX_DAYS = 366            # "at most 12 months ahead"
 VERBS = ("ignore", "track")
 SOURCES = {"SonarQube", "Snyk", "Trivy", "Semgrep", "Dependabot", "ClamAV", "GuardDog", "Gitleaks",
            "OSV-Scanner", "zizmor"}   # kept equal to the schema's `src` enum by a test
@@ -69,11 +68,19 @@ class Waiver:
                 return False
         if self.loc is not None and not fnmatch.fnmatchcase(row.get("loc", ""), self.loc):
             return False
-        if self.project is not None and self.project not in (row.get("project_id"), row.get("proj")):
+        if self.project is not None and self.project != row.get("project_id"):
             return False
         if self.track is not None and self.track != row.get("track"):
             return False
         return True
+
+
+def _latest(today):
+    """Twelve calendar months from today (29 February maps to 28 February)."""
+    try:
+        return today.replace(year=today.year + 1)
+    except ValueError:
+        return today.replace(year=today.year + 1, day=28)
 
 
 def _fail(line, message):
@@ -106,6 +113,8 @@ def parse(text, today):
         for need in ("reason", "until"):
             if need not in fields:
                 _fail(n, f"{need} is required")
+        if not re.search(r"[^\s\x00-\x1f]", fields["reason"]):
+            _fail(n, "reason must say why")
         if len(fields["reason"]) > 300:
             _fail(n, "reason is longer than 300 characters")
         if not any(k in fields for k in MATCHERS):
@@ -117,8 +126,8 @@ def parse(text, today):
             until = _dt.date.fromisoformat(fields["until"])
         except ValueError:
             _fail(n, f"until {fields['until']!r} is not a real date")
-        if until > today + _dt.timedelta(days=MAX_DAYS):
-            _fail(n, f"until is more than 12 months away (latest {today + _dt.timedelta(days=MAX_DAYS)}); "
+        if until > _latest(today):
+            _fail(n, f"until is more than 12 months away (latest {_latest(today)}); "
                      f"a waiver must be renewed, not left forever")
         fields["until"] = until
         if "src" in fields and fields["src"] not in SOURCES:
@@ -128,7 +137,7 @@ def parse(text, today):
         if verb == "track" and "ticket" not in fields:
             _fail(n, "track needs a ticket: it means a real finding that someone is working on")
         if "expect" in fields:
-            if not fields["expect"].isdigit() or int(fields["expect"]) < 1:
+            if not re.fullmatch(r"[0-9]{1,6}", fields["expect"]) or int(fields["expect"]) < 1:
                 _fail(n, "expect must be a whole number, 1 or more")
             fields["expect"] = int(fields["expect"])
         out.append(Waiver(n, verb, fields))
@@ -138,10 +147,10 @@ def parse(text, today):
 def load(path, today):
     """Read the file at an explicit path -> (waivers, sha256 hex of its bytes)."""
     try:
-        if os.path.getsize(path) > MAX_BYTES:
-            raise WaiverError(f"{path}: larger than {MAX_BYTES // 1024} KB")
         with open(path, "rb") as fh:
-            data = fh.read()
+            data = fh.read(MAX_BYTES + 1)      # the reported size can be wrong (a pipe)
+        if len(data) > MAX_BYTES:
+            raise WaiverError(f"{path}: larger than {MAX_BYTES // 1024} KB")
     except OSError as exc:
         raise WaiverError(f"cannot read the waiver file {path!r} ({exc.__class__.__name__})") from exc
     try:
@@ -166,15 +175,17 @@ def apply(rows, waivers, today):
     errors = []
     for w in waivers:
         if w.until < today:
-            errors.append(f"line {w.line}: expired on {w.until.isoformat()}; the findings "
-                            f"it covered are counted again")
+            errors.append(f"line {w.line}: expired on {w.until.isoformat()} and no longer applies; "
+                          f"its findings are counted unless another line covers them")
             continue
         picked = [r for r in rows if r["waiver"] is None and w.selects(r)]
         for r in picked:
-            if r.get("kind") in STRICT_KINDS or is_malware(r):
+            kinds = {r.get("kind"), *(a.get("kind") for a in r.get("also") or [])}
+            if kinds & STRICT_KINDS or is_malware(r):
                 if w.track is None:
                     raise WaiverError(
-                        f"waiver file line {w.line}: a pattern reaches the {r['kind']} finding "
+                        f"waiver file line {w.line}: a pattern reaches the "
+                        f"{'/'.join(sorted(k for k in kinds & STRICT_KINDS)) or r['kind']} finding "
                         f"{r.get('track')} ({r.get('loc')}); secrets and malware can only be waived "
                         f"one by one, with track=<its track key>")
             if r.get("rank", 5) <= 1 and not w.ticket:
@@ -183,7 +194,7 @@ def apply(rows, waivers, today):
                     f"({r.get('ref')} {r.get('loc')}); HIGH and above need ticket=")
         if w.expect is not None and len(picked) > w.expect:
             errors.append(f"line {w.line}: selects {len(picked)} findings but expect={w.expect}; "
-                            f"it waives none until the file is reviewed")
+                            f"it waives none itself until the file is reviewed")
             w.matched = len(picked)
             continue
         for r in picked:

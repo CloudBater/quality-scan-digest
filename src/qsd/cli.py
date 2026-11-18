@@ -118,11 +118,12 @@ def main(argv=None):
                 ap.error(f"unknown tool: {', '.join(unknown)}")
             with open(a.config, encoding="utf-8") as fh:
                 config = json.load(fh)
+            if a.ignore_file:
+                # Through the config, so the same checkout check applies as for the config key.
+                config["ignore_file"] = os.path.abspath(a.ignore_file)
             manifest, run_dir = scan(config, os.path.dirname(os.path.abspath(a.config)),
                                      os.path.abspath(a.out_dir), a.release, tools)
             manifest["settings"]["dedup"] = ",".join(a.dedup) or "none"
-            if a.ignore_file:
-                manifest["ignore_file"] = os.path.abspath(a.ignore_file)
             with open(os.path.join(run_dir, "manifest.json"), "w", encoding="utf-8") as fh:
                 json.dump(manifest, fh, indent=1)
             payload = build_payload(manifest, "", a.dedup)

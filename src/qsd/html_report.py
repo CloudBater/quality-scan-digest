@@ -72,6 +72,7 @@ A row seen by several scanners is listed once; its other sightings are listed un
 const ALL = __DATA__;
 const ignored = r => r.waiver && r.waiver.status === "ignore";
 const DATA = ALL.filter(r => !ignored(r)), WAIVED = ALL.filter(ignored);
+const sightings = r => (r.also||[]).length?`<details><summary>${r.also.length} more sighting(s)</summary>${r.also.map(a=>`<div><span class="tag">${esc(a.src)}</span> <span class="sev ${esc(a.sev)}">${esc(a.sev)}</span> ${esc(a.msg)} <code>${esc(a.ref)} ${esc(a.loc)}${a.line?":"+esc(a.line):""}</code></div>`).join("")}</details>`:"";
 const $ = i => document.getElementById(i);
 let sortKey = null, sortAsc = true;
 const facet = {proj:r=>[r.proj], src:r=>r.by, kind:r=>[r.kind], sev:r=>[r.sev]};
@@ -89,7 +90,7 @@ function render(){
     <td class="sev ${esc(r.sev)}">${esc(r.sev)}</td>
     <td><span class="tag">${esc(r.proj)}</span></td>
     <td>${r.by.map(s=>`<span class="tag">${esc(s)}</span>`).join("")}</td><td>${esc(r.kind)}</td>
-    <td>${esc(r.msg)}<br><code>${esc([r.ref,...(r.ids||[])].filter((v,i,a)=>v&&a.indexOf(v)===i).join(" · "))}</code>${r.waiver?`<br><span class="tag">Tracked: ${esc(r.waiver.ticket)}</span> <code>${esc(r.waiver.reason)} (until ${esc(r.waiver.until)})</code>`:""}${(r.also||[]).length?`<details><summary>${r.also.length} more sighting(s)</summary>${r.also.map(a=>`<div><span class="tag">${esc(a.src)}</span> <span class="sev ${esc(a.sev)}">${esc(a.sev)}</span> ${esc(a.msg)} <code>${esc(a.ref)} ${esc(a.loc)}${a.line?":"+esc(a.line):""}</code></div>`).join("")}</details>`:""}</td>
+    <td>${esc(r.msg)}<br><code>${esc([r.ref,...(r.ids||[])].filter((v,i,a)=>v&&a.indexOf(v)===i).join(" · "))}</code>${r.waiver?`<br><span class="tag">Tracked: ${esc(r.waiver.ticket)}</span> <code>${esc(r.waiver.reason)} (until ${esc(r.waiver.until)})</code>`:""}${sightings(r)}</td>
     <td><code>${esc(r.loc)}</code>${r.line?` <code>:${esc(r.line)}</code>`:""}</td>
     <td>${esc(r.fix)}</td></tr>`).join("");
   $("count").textContent=`${rows.length} of ${DATA.length} findings`;
@@ -100,7 +101,7 @@ if (WAIVED.length) {
   $("waived-sum").textContent = `Waived (${WAIVED.length})`;
   $("waived-rows").innerHTML = WAIVED.map(r=>`<tr><td class="sev ${esc(r.sev)}">${esc(r.sev)}</td>
     <td><span class="tag">${esc(r.proj)}</span></td><td>${r.by.map(s=>`<span class="tag">${esc(s)}</span>`).join("")}</td>
-    <td>${esc(r.msg)}<br><code>${esc(r.ref)}</code></td><td><code>${esc(r.loc)}${r.line?":"+esc(r.line):""}</code></td>
+    <td>${esc(r.msg)}<br><code>${esc(r.ref)}</code>${sightings(r)}</td><td><code>${esc(r.loc)}${r.line?":"+esc(r.line):""}</code></td>
     <td>${esc(r.waiver.reason)}</td><td>${esc(r.waiver.until)}</td><td>${esc(r.waiver.ticket)}</td></tr>`).join("");
 }
 document.querySelectorAll("th").forEach(th=>th.onclick=()=>{const k=th.dataset.k;sortAsc=sortKey===k?!sortAsc:true;sortKey=k;render();});
@@ -143,7 +144,8 @@ def render(payload):
     unrated = sum(s.get("sec_unrated") or 0 for s in summaries)
     malware = sum(s.get("malware") or 0 for s in summaries)
     if not malware:
-        malware = sum(1 for r in rows if r.get("kind") in ("Malware", "Malicious Package"))
+        malware = sum(1 for r in rows if r.get("kind") in ("Malware", "Malicious Package")
+                      and not (r.get("waiver") or {}).get("status") == "ignore")
     sonar = lambda k: _sum((s.get("sonar") or {}).get(k) for s in summaries)  # noqa: E731
     dbot = _sum((s.get("dependabot") or {}).get("unique") for s in summaries)
     ncloc = sonar("ncloc")
@@ -252,8 +254,8 @@ def render(payload):
                        f'is not a full-scan result.</div>')
     if wb and wb.get("errors"):
         listed = "; ".join(html.escape(e) for e in wb["errors"])
-        banners.append(f'<div class="banner">⚠ <b>Waiver problem</b> — {listed}. The findings those '
-                       f'waivers would have set aside are counted.</div>')
+        banners.append(f'<div class="banner">⚠ <b>Waiver problem</b> — {listed}. Those lines '
+                       f'do not apply, so the findings they covered are counted unless another line covers them.</div>')
     banner = "".join(banners)
     parts = {
         "TITLE": html.escape(payload["title"]),

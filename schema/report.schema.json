@@ -186,7 +186,16 @@
                   "matched": {
                     "type": "integer"
                   }
-                }
+                },
+                "required": [
+                  "line",
+                  "status",
+                  "reason",
+                  "ticket",
+                  "until",
+                  "expect",
+                  "matched"
+                ]
               }
             },
             "stale": {
