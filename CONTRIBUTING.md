@@ -32,5 +32,17 @@ Python 3.10+. Keep inline comments to one line that says *why*.
 
 ## Commits and releases
 
-Small, focused commits with a clear subject line. Releases are tagged `vX.Y.Z`; the
-version lives in `src/qsd/__init__.py`.
+Small, focused commits with a clear subject line.
+
+**Releasing is merging a version bump.** The version lives in `src/qsd/__init__.py`. To
+release: change `__version__` to the new `X.Y.Z`, add a `## [X.Y.Z]` section to
+`CHANGELOG.md`, and merge to `main`. Once the tests pass on `main`, CI
+(`.github/workflows/ci.yml`, `.github/scripts/auto_tag.py`) creates the annotated tag
+`vX.Y.Z` on that commit, with the changelog section as its message. Most merges do not
+change the version, and then nothing is tagged.
+
+- A pull request shows what its merge will do (`tag-check`): tag, nothing to do, or refuse.
+- It refuses, and tags nothing, when the version is not plain `X.Y.Z`, is lower than the
+  newest tag, or has no non-empty changelog section.
+- It never moves or overwrites a tag. To fix a bad release, bump to the next version.
+- Tags created this way are annotated but not signed (CI has no signing key).
