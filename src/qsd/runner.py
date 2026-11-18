@@ -146,14 +146,36 @@ def _inside(base, *parts):
 _ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "f": "\f"}
 
 
+def _key_of(logical):
+    """The key of one logical properties line (see _properties_keys)."""
+    key, i = [], 0
+    while i < len(logical):
+        ch = logical[i]
+        if ch == "\\" and i + 1 < len(logical):
+            nxt = logical[i + 1]
+            if nxt == "u" and re.fullmatch(r"[0-9a-fA-F]{4}", logical[i + 2:i + 6] or ""):
+                key.append(chr(int(logical[i + 2:i + 6], 16)))
+                i += 6
+                continue
+            key.append(_ESCAPES.get(nxt, nxt))
+            i += 2
+            continue
+        if ch in "=: \t\f":
+            break
+        key.append(ch)
+        i += 1
+    return "".join(key)
+
+
 def _properties_keys(text):
     """Keys of a Java .properties file, parsed by Java's rules.
 
     A key ends at the first unescaped `=`, `:` or whitespace (so `a.b:c` and `a.b c` set
     key `a.b` just like `a.b=c`); a line starting with `#` or `!` is a comment (`#`
-    later in a line is not); a trailing backslash continues the line; keys may contain
-    backslash escapes and \\uXXXX. A parser that only split on `=` could be bypassed by
-    the other separators or by escapes.
+    later in a line is not); a trailing backslash continues the line, **including at the
+    end of the file**, where Java still keeps the pending line; keys may contain
+    backslash escapes and \\uXXXX. A parser that only split on `=`, or that dropped a
+    pending line at EOF, could be bypassed.
     """
     keys, logical, carry = [], "", False
     for raw in text.splitlines():
@@ -167,31 +189,26 @@ def _properties_keys(text):
             logical, carry = logical + line[:-1], True
             continue
         logical, carry = logical + line, False
-        key, i = [], 0
-        while i < len(logical):
-            ch = logical[i]
-            if ch == "\\" and i + 1 < len(logical):
-                nxt = logical[i + 1]
-                if nxt == "u" and re.fullmatch(r"[0-9a-fA-F]{4}", logical[i + 2:i + 6] or ""):
-                    key.append(chr(int(logical[i + 2:i + 6], 16)))
-                    i += 6
-                    continue
-                key.append(_ESCAPES.get(nxt, nxt))
-                i += 2
-                continue
-            if ch in "=: \t\f":
-                break
-            key.append(ch)
-            i += 1
+        key = _key_of(logical)
         if key:
-            keys.append("".join(key))
+            keys.append(key)
         logical = ""
+    if carry and logical:  # the file ends in the middle of a continued line
+        key = _key_of(logical)
+        if key:
+            keys.append(key)
     return keys
 
 
 def _reject_dangerous_sonar_properties(path):
     """Refuse a checkout sonar-project.properties that could redirect the scanner or token."""
     props = os.path.join(path, "sonar-project.properties")
+    # lstat, not isfile: a symlink (even a dangling one on the host, such as one pointing at
+    # /usr/src/payload.properties) would resolve to checkout-controlled bytes INSIDE the
+    # scanner container, and this host-side check would never have read them.
+    if os.path.islink(props):
+        raise SonarError("sonar-project.properties is a symlink; it is read inside the "
+                         "scanner container, so it cannot be validated here")
     if not os.path.isfile(props):
         return
     try:

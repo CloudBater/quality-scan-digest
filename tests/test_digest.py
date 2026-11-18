@@ -1060,5 +1060,197 @@ class ReviewRound2(unittest.TestCase):
             shutil_rmtree(s.secret_dir)
 
 
+class ReviewRound3(unittest.TestCase):
+    """Final review: each test fails if its fix is reverted."""
+
+    def tj(self, doc):
+        return tmpjson(doc)
+
+    # -- properties file bypasses
+    def test_a_continued_line_at_the_end_of_the_file_is_still_checked(self):
+        from qsd import runner
+        for text in ("sonar.scanner.javaExePath=/x\\", "sonar.scanner.javaExePath=/x\\\n",
+                     "sonar.sources=a\nsonar.scanner.javaExePath=/x\\"):
+            d = tempfile.mkdtemp()
+            with open(os.path.join(d, "sonar-project.properties"), "w") as fh:
+                fh.write(text)
+            with self.assertRaises(runner.SonarError, msg=repr(text)):
+                runner._reject_dangerous_sonar_properties(d)
+        self.assertEqual(runner._properties_keys("a=1\\\n  b=2"), ["a"])
+
+    def test_a_symlinked_properties_file_is_refused_even_when_it_dangles(self):
+        from qsd import runner
+        for target in ("/usr/src/payload.properties", "real.properties"):
+            d = tempfile.mkdtemp()
+            with open(os.path.join(d, "real.properties"), "w") as fh:
+                fh.write("sonar.sources=.\n")
+            os.symlink(target, os.path.join(d, "sonar-project.properties"))
+            with self.assertRaises(runner.SonarError, msg=target):
+                runner._reject_dangerous_sonar_properties(d)
+
+    # -- optional / skipped and empty declarations
+    def test_a_parse_failure_is_never_excused_by_skipped(self):
+        d = tempfile.mkdtemp()
+        ok = os.path.join(FIX, "semgrep.json")
+        bad = tmpjson({"error": "scan failed"})
+        m = {"projects": [{"name": "a", "semgrep": ok},
+                          {"name": "b", "semgrep": bad, "skipped": ["Semgrep"]}]}
+        p = build_payload(m)
+        self.assertFalse(p["sources"]["b: Semgrep"]["optional"])
+        path = os.path.join(d, "m.json")
+        with open(path, "w") as fh:
+            json.dump(m, fh)
+        env = dict(os.environ, PYTHONPATH=os.path.join(HERE, "..", "src"))
+        r = subprocess.run([sys.executable, "-m", "qsd", "digest", path, "--json-out",
+                            os.path.join(d, "r.json")], env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+
+    def test_a_source_nobody_supplied_is_optional_only_when_skipped(self):
+        d = tempfile.mkdtemp()
+        none = os.path.join(d, "none.json")
+        ok = os.path.join(FIX, "semgrep.json")
+        for skipped, want in (([], False), (["Dependabot"], True)):
+            s = build_payload({"projects": [{"name": "a", "semgrep": ok, "dependabot": none,
+                                             "skipped": skipped}]})["sources"]["a: Dependabot"]
+            self.assertEqual(s["optional"], want)
+
+    def test_declared_but_empty_sources_are_errors(self):
+        ok = os.path.join(FIX, "semgrep.json")
+        for extra in ({"snyk": {}}, {"sonarqube": None}, {"trivy": {}}, {"guarddog": {}},
+                      {"semgrep": ""}):
+            with self.assertRaises(ManifestError, msg=extra):
+                build_payload({"projects": [{"name": "a", "semgrep": ok},
+                                            dict({"name": "b", "coverage": ok}, **extra)]})
+
+    def test_the_runners_empty_sonarqube_with_a_note_is_still_accepted(self):
+        ok = os.path.join(FIX, "semgrep.json")
+        p = build_payload({"projects": [{"name": "a", "semgrep": ok, "sonarqube": {},
+                                         "notes": {"SonarQube": "docker not on PATH"}}]})
+        s = p["sources"]["a: SonarQube"]
+        self.assertEqual((s["collected"], s["optional"], s["note"]), (False, False, "docker not on PATH"))
+        p = build_payload({"projects": [{"name": "a", "semgrep": ok, "sonarqube": {},
+                                         "notes": {"SonarQube": "skipped: not in --tools"},
+                                         "skipped": ["SonarQube"]}]})
+        self.assertTrue(p["sources"]["a: SonarQube"]["optional"])
+
+    def test_two_sources_with_the_same_key_never_overwrite_each_other(self):
+        ok = os.path.join(FIX, "semgrep.json")
+        part = tmpjson({"results": [], "errors": [{"level": "warn", "path": "a.py"}]})
+        for order in (False, True):
+            projects = [{"name": "p1", "label": "A", "trivy": {"X: Semgrep": ok}},
+                        {"name": "p2", "label": "A: Trivy X", "semgrep": part}]
+            with self.assertRaises(ManifestError):
+                build_payload({"projects": projects[::-1] if order else projects})
+
+    # -- the waived count survives export -> digest
+    def test_a_sonar_export_round_trips_through_the_digest(self):
+        from qsd import runner
+        from qsd.parsers import sonarqube as sq
+        real = (runner.fetch_all, runner.api, runner.waived_count)
+        runner.fetch_all = lambda *a, **k: ([], 0)
+        runner.api = lambda *a, **k: {"component": {"measures": [{"metric": "ncloc", "value": "5"}]}}
+        results = {}
+        try:
+            for name, answer in (("count", (7, "")), ("error", (None, "HTTP 500"))):
+                runner.waived_count = lambda *a, **k: answer
+                d = tempfile.mkdtemp()
+                s = runner.Sonar(d)
+                try:
+                    out = s.export("k", d)
+                finally:
+                    shutil_rmtree(s.secret_dir)
+                results[name] = sq.to_rows(sq.load_files(out), "A")[1]
+        finally:
+            runner.fetch_all, runner.api, runner.waived_count = real
+        self.assertEqual(results["count"]["suppressed"], 7)
+        self.assertIn("unavailable", results["error"]["note"])
+        self.assertTrue(results["error"]["complete"])
+
+    # -- partial counts distinct files
+    def test_partial_counts_distinct_files_not_warnings(self):
+        w = lambda *paths: semgrep.load(tmpjson({"results": [], "errors": [
+            {"level": "warn", **({"path": p} if p else {})} for p in paths]}), "A")[1]
+        self.assertEqual(w("x.py", "x.py")["partial"], 1)
+        self.assertEqual(w("x.py", "y.py", "x.py")["partial"], 2)
+        self.assertEqual(w(None, None, "x.py")["partial"], 3)  # a warning with no file counts alone
+        self.assertIn("1 file(s)", w("x.py", "x.py")["note"])
+
+    # -- behaviours the review found nothing guarding
+    def test_snyk_and_zizmor_waivers_and_dependabot_auto_dismissed_are_counted(self):
+        sarif = {"runs": [{"tool": {"driver": {"rules": []}}, "results": [
+            {"ruleId": "r", "message": {"text": "x"}, "suppressions": [{"kind": "external"}]},
+            {"ruleId": "r2", "message": {"text": "y"}, "suppressions": [{"kind": "inSource"}]}]}]}
+        self.assertEqual(snyk.load(tmpjson(sarif), "Code", "A")[1]["suppressed"], 2)
+        zz = [{"ident": "i", "desc": "d", "url": "u", "ignored": True,
+               "determinations": {"severity": "High", "confidence": "High"}, "locations": []}] * 3
+        self.assertEqual(zizmor.load(tmpjson(zz), "A")[1]["suppressed"], 3)
+        alert = lambda state: {"state": state, "security_advisory": {"ghsa_id": "GHSA-a-b-" + state,
+            "severity": "low", "summary": "s", "identifiers": []},
+            "security_vulnerability": {"package": {"name": "p"}}, "dependency": {"manifest_path": "m"}}
+        st = dependabot.load(tmpjson([alert("open"), alert("dismissed"), alert("auto_dismissed"),
+                                      alert("fixed")]), "A")[1]
+        self.assertEqual(st["suppressed"], 2)
+
+    def test_the_column_is_extracted_by_every_parser_that_has_one(self):
+        sg = semgrep.load(tmpjson({"results": [{"check_id": "x", "path": "a.py",
+            "start": {"line": 3, "col": 9}, "extra": {"severity": "INFO", "message": "m"}}],
+            "errors": []}), "A")[0][0]
+        self.assertEqual(sg["col"], 9)
+        sarif = {"runs": [{"tool": {"driver": {"rules": []}}, "results": [{
+            "ruleId": "r", "message": {"text": "x"}, "locations": [{"physicalLocation": {
+                "artifactLocation": {"uri": "a.py"}, "region": {"startLine": 2, "startColumn": 5}}}]}]}]}
+        self.assertEqual(snyk.load(tmpjson(sarif), "Code", "A")[0][0]["col"], 5)
+        zz = [{"ident": "i", "desc": "d", "url": "u", "determinations": {"severity": "High", "confidence": "High"},
+               "locations": [{"symbolic": {"key": {"Local": {"verbatim_path": "w.yml"}}, "kind": "Primary"},
+                              "concrete": {"location": {"start_point": {"row": 1, "column": 7}}}}]}]
+        self.assertEqual(zizmor.load(tmpjson(zz), "A")[0][0]["col"], 7)
+        hs = {"issues": {"issues": [], "total": 0}, "hotspots": {"hotspots": [{
+            "vulnerabilityProbability": "LOW", "message": "m", "component": "p:a.py", "line": 1,
+            "ruleKey": "r", "textRange": {"startOffset": 11}}], "total": 1},
+            "measures": {"component": {"measures": [{"metric": "ncloc", "value": "3"}]}}}
+        self.assertEqual(sonarqube.to_rows(hs, "A")[0][0]["col"], 11)
+
+    def test_a_merged_rows_other_sightings_keep_their_column(self):
+        rows, _ = dedup([row(ids=["CVE-1"], package="a", col=4),
+                         row(src="Dependabot", ids=["CVE-1"], package="a", col=9)])
+        self.assertEqual(rows[0]["also"][0]["col"], 9)
+
+    def test_semgrep_public_mode_drops_the_token_and_ci_mode_forwards_the_branch(self):
+        from qsd import runner
+        seen = {}
+        real_run, real_env = runner.run, dict(os.environ)
+        runner.run = lambda cmd, logfile, cwd=None, env=None: (seen.update(cmd=cmd, env=env) or 2)
+        os.environ["SEMGREP_APP_TOKEN"] = "secret-token"
+        try:
+            d = tempfile.mkdtemp()
+            notes = {}
+            runner._semgrep({"name": "a", "repo": "o/r", "semgrep_branch": "release/v1"}, d,
+                            os.path.join(d, "o.json"), os.path.join(d, "l.log"), notes, "public")
+            self.assertNotIn("SEMGREP_APP_TOKEN", seen["env"])
+            self.assertEqual(seen["cmd"][:2], ["semgrep", "scan"])
+            runner._semgrep({"name": "a", "repo": "o/r", "semgrep_branch": "release/v1"}, d,
+                            os.path.join(d, "o.json"), os.path.join(d, "l.log"), notes, "ci")
+            self.assertEqual(seen["env"]["SEMGREP_BRANCH"], "release/v1")
+            self.assertEqual(seen["cmd"][:2], ["semgrep", "ci"])
+        finally:
+            runner.run = real_run
+            os.environ.clear()
+            os.environ.update(real_env)
+
+    def test_the_clamav_container_command_reports_a_freshclam_failure(self):
+        from qsd import runner
+        seen = {}
+        real = (runner.have, runner._clamav_db_ready, subprocess.run)
+        runner.have = lambda t: t == "docker"
+        runner._clamav_db_ready = lambda: False
+        subprocess.run = lambda cmd, **kw: (seen.update(cmd=cmd) or subprocess.CompletedProcess(cmd, 0))
+        try:
+            d = tempfile.mkdtemp()
+            runner._clamav(d, os.path.join(d, "c.txt"), os.path.join(d, "l.log"), {})
+        finally:
+            runner.have, runner._clamav_db_ready, subprocess.run = real
+        self.assertIn("# qsd: freshclam failed", " ".join(seen["cmd"]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -111,6 +111,8 @@ Dependabot 以 `open,dismissed,auto_dismissed` 抓取：被 dismiss 的警示計
 
 ## 去除重複
 
+**`advisory` 的已知限制：** 它依套件與通報編號比對，不看安裝的版本或 manifest。如果兩個 manifest 安裝了同一個套件的不同版本，而且同一則通報都影響它們，並且兩個掃描器各回報其中一個，這兩筆會合併成一列；另一個出現處會完整保留在 `also`（含位置），但計數只算一個發現。需要「每個出現處各一列」時，請用 `--dedup exact`。
+
 每一輪都刻意保守：合併錯了會把問題藏起來，漏合併只是多算幾筆。
 
 | 規則 | 預設 | 合併條件 |
@@ -136,8 +138,8 @@ Dependabot 以 `open,dismissed,auto_dismissed` 抓取：被 dismiss 的警示計
                         "commit_dirty": false, "sonar": {…}, "coverage": {…}, "dependabot": {…},
                         "findings": 120, "security": 40, "sec_crit_high": 3, "sec_unrated": 1,
                         "malware": 2, "by_source": {…} } ],
-  "sources": { "API: Semgrep": { "collected": true, "complete": false,
-                                 "note": "PARTIAL SCAN: 91 file(s) only partly parsed, so Semgrep did not fully scan them (the rest of the repository was scanned)", "suppressed": 0, "partial": 91, "optional": false } },
+  "sources": { "API: Semgrep": { "collected": true, "complete": true,
+                                 "note": "PARTIAL SCAN: 88 file(s) only partly parsed, so Semgrep did not fully scan them (the rest of the repository was scanned)", "suppressed": 0, "partial": 88, "optional": false } },
   "dedup":   { "input": 180, "passes": ["exact", "advisory"], "exact": 4, "advisory": 56, "output": 120 },
   "findings": [ { "id": "…", "track": "…", "project_id": "api", "proj": "API", "src": "Snyk",
                   "by": ["Snyk", "Dependabot"], "kind": "Dependency", "security": true,

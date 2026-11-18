@@ -62,7 +62,15 @@ def validate(manifest):
         names.add(name)
         labels.add(label)
         p["name"], p["label"] = name, label
-        if not any(k in p for k in SOURCE_KEYS):
+        for k in SOURCE_KEYS:
+            if k in p and not p[k]:
+                # The runner writes `sonarqube: {}` for a SonarQube it could not run, and
+                # always with a note; nothing else may be declared empty.
+                if k == "sonarqube" and "SonarQube" in (p.get("notes") or {}):
+                    continue
+                raise ManifestError(f"project {name!r}: `{k}` is declared but empty; an empty "
+                                    f"source would report zero findings as if it were clean")
+        if not any(p.get(k) for k in SOURCE_KEYS):
             raise ManifestError(f"project {name!r} lists no sources ({', '.join(SOURCE_KEYS)}); "
                                 f"it would report zero findings as if it were clean")
         unknown = sorted(set(p.get("snyk") or {}) - set(p_snyk.PRODUCTS))
@@ -108,10 +116,13 @@ def collect_project(cfg, sonar_token=""):
 
     def record(source, st, optional=False):
         note = st["note"]
-        # `skipped` means "deliberately not run". A source that did run (it was
-        # collected, or it failed) is never optional, even if a hand-written manifest
-        # lists it there: a failure must not be hidden behind a skip.
-        opt = optional or bool(st.get("optional")) or (source in skipped and not st["ok"])
+        # `optional` is decided by the caller and only for a source that was never
+        # attempted (see `missing`): a parse failure, an error file or a failed fetch is
+        # never optional, even if a hand-written manifest lists the source under `skipped`.
+        opt = optional or bool(st.get("optional"))
+        # Sources of one project carry distinct prefixes (Trivy ..., Snyk ..., GuardDog ...),
+        # so they cannot collide; sources of different projects can, and build_payload
+        # refuses that.
         sources[f"{label}: {source}"] = {
             "collected": bool(st["ok"]),
             "complete": bool(st["ok"]) and st.get("complete", not st["note"]),
@@ -124,7 +135,10 @@ def collect_project(cfg, sonar_token=""):
         }
 
     def missing(source, default="not scanned"):
-        record(source, {"ok": False, "note": run_notes.get(source, default)})
+        # Nothing was supplied for this source: either it was deliberately not run
+        # (listed in `skipped`, optional) or it is simply missing (a gap).
+        record(source, {"ok": False, "note": run_notes.get(source, default)},
+               optional=source in skipped)
 
     def file_source(source, path, parse):
         nonlocal rows
@@ -137,16 +151,16 @@ def collect_project(cfg, sonar_token=""):
         return st
 
     sq = cfg.get("sonarqube")
-    if sq is not None:
+    if sq is not None and not (sq.get("host") or sq.get("issues")):
+        missing("SonarQube")  # nothing supplied: skipped on purpose, or a gap with its note
+    elif sq is not None:
         try:
             if sq.get("host"):
                 if not sonar_token:
                     raise p_sonar.SonarError("no token (set SONAR_TOKEN)")
                 doc = p_sonar.fetch(sq["host"], sonar_token, sq.get("project_key") or pid)
-            elif sq.get("issues"):
-                doc = p_sonar.load_files(sq)
             else:
-                raise p_sonar.SonarError(run_notes.get("SonarQube", "not scanned"))
+                doc = p_sonar.load_files(sq)
             r, st, measures = p_sonar.to_rows(doc, label, pid)
             rows += r
             record("SonarQube", st)
@@ -250,6 +264,10 @@ def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES):
         r, s, src = collect_project(cfg, sonar_token)
         raw += r
         summaries.append(s)
+        for key in src:
+            if key in sources:
+                raise ManifestError(f"two sources are both called {key!r}; rename a project "
+                                    f"label or a scan name so one cannot overwrite the other")
         sources.update(src)
 
     rows, stats = dedup(raw, passes or ())

@@ -124,7 +124,13 @@ def load_files(cfg):
     """Read an exported issues/hotspots/measures set. Issues are required."""
     if not cfg.get("issues"):
         raise SonarError("no issues export")
-    doc = {"issues": read_json(cfg["issues"])}
+    issues = read_json(cfg["issues"])
+    doc = {"issues": issues}
+    # `qsd scan` exports the waived count inside the issues document.
+    if isinstance(issues, dict):
+        for key in ("suppressed", "suppressed_error"):
+            if key in issues:
+                doc[key] = issues[key]
     if cfg.get("hotspots"):
         doc["hotspots"] = read_json(cfg["hotspots"])
     if cfg.get("measures"):

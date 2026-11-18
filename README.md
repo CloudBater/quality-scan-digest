@@ -163,6 +163,12 @@ over-counts.
 | `advisory` | on | project, package (ecosystem-aware name rules), and a CVE/GHSA id, from **different** scanners. A row with no package joins only when every id it carries points to one package group |
 | `sast` | **off** | project, file, line and CWE, reported by **different** scanners; each row joins at most one group, so nothing chains |
 
+**Known limitation of `advisory`:** it matches on package and advisory, not on the installed
+version or the manifest. If two manifests install different versions of one package that one
+advisory affects, and two scanners each report one of them, they merge into one row; the other
+occurrence is kept in full under `also` (with its location), and the count shows one finding.
+Use `--dedup exact` if you need one row per occurrence.
+
 The surviving row comes from the richest source, takes the **most severe** severity
 of the group, and keeps every other sighting (message, severity, rule, location, fix)
 under `also`. `by` lists every scanner that saw it. Nothing merges across projects;
@@ -185,8 +191,8 @@ Parsers themselves keep every affected version and manifest.
                         "commit_dirty": false, "sonar": {…}, "coverage": {…}, "dependabot": {…},
                         "findings": 120, "security": 40, "sec_crit_high": 3, "sec_unrated": 1,
                         "malware": 2, "by_source": {…} } ],
-  "sources": { "API: Semgrep": { "collected": true, "complete": false,
-                                 "note": "PARTIAL SCAN: 91 file(s) only partly parsed, so Semgrep did not fully scan them (the rest of the repository was scanned)", "suppressed": 0, "partial": 91, "optional": false } },
+  "sources": { "API: Semgrep": { "collected": true, "complete": true,
+                                 "note": "PARTIAL SCAN: 88 file(s) only partly parsed, so Semgrep did not fully scan them (the rest of the repository was scanned)", "suppressed": 0, "partial": 88, "optional": false } },
   "dedup":   { "input": 180, "passes": ["exact", "advisory"], "exact": 4, "advisory": 56, "output": 120 },
   "findings": [ { "id": "…", "track": "…", "project_id": "api", "proj": "API", "src": "Snyk",
                   "by": ["Snyk", "Dependabot"], "kind": "Dependency", "security": true,
@@ -208,8 +214,10 @@ column when the tool reports one). Waived findings are counted under
 `sources.*.suppressed` where the tool exposes them: Snyk Code SARIF suppressions,
 zizmor `ignored`, Dependabot dismissed/auto_dismissed, and SonarQube issues that are accepted
 or false positive (not fixed ones).
-Snyk Open Source / IaC / Container JSON and file-exported Sonar do not include waivers,
-so those stay uncounted rather than silently zero.
+Snyk Open Source / IaC / Container JSON does not include waivers, so those stay uncounted
+rather than silently zero. If a SonarQube waived-issue count cannot be read, the source says
+"waived-issue count unavailable" instead of reporting 0. `qsd scan` exports the SonarQube
+count, so a digest of its raw outputs carries it too.
 
 ## Security notes
 

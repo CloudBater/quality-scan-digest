@@ -13,7 +13,7 @@ All notable changes to this project are documented here. The format follows
 - HTML "Security crit + high" turns green only when every *required* source is complete;
   a zero under a gap is no longer painted as clean. Incomplete runs get a banner.
 - **Semgrep files it could only partly parse (`warn`) are a PARTIAL SCAN, not a gap.** On
-  real repositories this is the normal state (91 files on a Django backend, 19 on a Next.js
+  real repositories this is the normal state (88 files, from 91 warnings, on a Django backend; 19 on a Next.js
   frontend, every run), so treating it as an incomplete source made every strict run exit 2,
   and the published history counted these runs as complete. The source stays *complete*
   (strict passes) but is never silent: `sources.*.partial` carries the file count, the note
@@ -39,9 +39,17 @@ All notable changes to this project are documented here. The format follows
   not `resolved=true`, which also includes fixed issues. `qsd scan` exports it too (it used
   to report none). If the count cannot be read the source says "waived-issue count
   unavailable" instead of reporting 0.
-- A manifest project that lists no source, or a misspelled Snyk product, is an error
-  instead of contributing zero findings; a source that did run is never optional because a
-  manifest lists it under `skipped`.
+- A manifest project that lists no source, a source declared but empty (`"snyk": {}`,
+  `"sonarqube": null`), or a misspelled Snyk product is an error instead of contributing zero
+  findings. `skipped` only excuses a source that was never attempted: a parse failure, an
+  error file or a failed fetch stays required even if it is listed there. Two sources with
+  the same key (project label + scan name) are an error instead of silently overwriting each
+  other.
+- `sonar-project.properties`: a continued line at the end of the file is no longer dropped
+  (the guard could be bypassed with a final trailing backslash), and a symlinked file is
+  refused because it would resolve inside the scanner container.
+- `sources.*.partial` counts distinct files, not warnings (88 files from 91 warnings on a
+  real backend). The waived-issue count survives the export-to-digest round trip.
 - `track` is unique within a report. It is location and identity without the message, so it
   survives a scanner rewording a title; rows whose key collides (same rule, file and line,
   different message) are told apart by a hash of the message, and identical rows with dedup
@@ -80,12 +88,17 @@ All notable changes to this project are documented here. The format follows
 - `track`: stable finding key (no message) for trend diffs; `id` still
   includes the message and remains the display hash.
 - `sources.*.suppressed`: Snyk Code SARIF suppressions, zizmor `ignored`, Dependabot
-  dismissed/auto_dismissed, and (live) Sonar resolved issues are counted — not every
-  scanner (Snyk OSS JSON and file-exported Sonar do not surface waivers).
+  dismissed/auto_dismissed, and SonarQube accepted / false-positive issues are counted;
+  not every scanner exposes waivers (Snyk Open Source JSON does not).
 - `sources.*.optional`: tools left out of `--tools` still appear in `sources` so a
   screenshot cannot hide the rest of the coverage contract; they do not fail `--strict`.
 - Project `sec_unrated`, `malware`, `commit_dirty`; settings `tools`, `images`, `runners`.
 - Schema `1.1`, shipped inside the wheel (`qsd/data/report.schema.json`).
+
+### Known limitations
+- `advisory` dedup matches on package and advisory, not on installed version or manifest, so one
+  advisory reported by two scanners for two different versions in two manifests becomes one row
+  (the other occurrence stays under `also`). Unchanged since 0.3.0; `--dedup exact` avoids it.
 
 ### Changed
 - **`--strict` is the default.** Use `--lenient` / `--no-strict` for partial local runs.

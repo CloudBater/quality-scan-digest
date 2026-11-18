@@ -47,14 +47,18 @@ def load(path, label, project_id=None, partial_is_gap=False):
     # Set semgrep_partial_is_gap=false for noisy repos that only want a note.
     errs = doc.get("errors") or []
     hard = [e for e in errs if str(e.get("level", "error")).lower() != "warn"]
-    warns = len(errs) - len(hard)
+    soft = [e for e in errs if e not in hard]
+    # Several warnings can name one file (a syntax error and a partial parse), so count the
+    # distinct files; a warning that names no file counts as one of its own.
+    warns = len({e.get("path") for e in soft if e.get("path")}) + \
+        sum(1 for e in soft if not e.get("path"))
 
     # PARTIAL SCAN vs INCOMPLETE SOURCE -- why these are two different things.
     #
     # `warn`-level errors mean Semgrep could only partly parse some files (language
     # features its parser lacks, e.g. newer Python syntax). On real repositories this is
-    # the NORMAL state: 91 files on a Django backend and 19 on a Next.js frontend, on
-    # every single run. If that counted as an incomplete source, every strict run would
+    # the NORMAL state: 88 files (91 warnings) on a Django backend and 19 on a Next.js
+    # frontend, on every single run. If that counted as an incomplete source, every strict run would
     # exit 2 and the only way to publish would be to switch strict off, which would then
     # hide real gaps as well. The published history also counted these runs as complete.
     #
