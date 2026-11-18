@@ -141,6 +141,7 @@ def to_rows(doc, label, project_id=None):
             sev=i.get("severity"), msg=i.get("message", ""),
             loc=(i.get("component") or "").split(":", 1)[-1],
             line=i.get("line"), ref=i.get("rule", ""),
+            col=(i.get("textRange") or {}).get("startOffset"),
         ))
     for h in hotspots:
         rows.append(finding(
@@ -148,5 +149,6 @@ def to_rows(doc, label, project_id=None):
             sev=h.get("vulnerabilityProbability"), msg=h.get("message", ""),
             loc=(h.get("component") or "").split(":", 1)[-1],
             line=h.get("line"), ref=h.get("ruleKey", ""),
+            col=(h.get("textRange") or {}).get("startOffset"),
         ))
     return rows, status(note="; ".join(notes)), measures

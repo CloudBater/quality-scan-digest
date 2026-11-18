@@ -29,7 +29,7 @@ def load(path, product, label, project_id=None):
     if not all(isinstance(d, dict) and any(k in d for k in _KNOWN) for d in docs):
         return failed("not recognisable Snyk output")
 
-    rows, deps = [], None
+    rows, deps, suppressed = [], None, 0
     # Container results carry the image's OS packages at the top level and the
     # application dependencies found inside it under `applications`.
     targets = []
@@ -83,12 +83,14 @@ def load(path, product, label, project_id=None):
                      run.get("tool", {}).get("driver", {}).get("rules", [])}
             for res in run.get("results") or []:
                 if res.get("suppressions"):
-                    continue  # ignored in Snyk; not an open finding
-                loc, line = "", ""
+                    suppressed += 1  # waived in Snyk; counted, not listed as open
+                    continue
+                loc, line, col = "", "", ""
                 for loc_ in res.get("locations") or []:
                     pl = loc_.get("physicalLocation", {})
                     loc = pl.get("artifactLocation", {}).get("uri", "")
                     line = pl.get("region", {}).get("startLine", "")
+                    col = pl.get("region", {}).get("startColumn", "")
                     break
                 rule = rules.get(res.get("ruleId"), {})
                 props = rule.get("properties", {})
@@ -98,8 +100,8 @@ def load(path, product, label, project_id=None):
                     project_id=project_id, proj=label, src="Snyk", kind="Vulnerability",
                     sev=_SARIF_SEV.get(sev, sev),
                     msg=(res.get("message") or {}).get("text", ""),
-                    loc=loc, line=line,
+                    loc=loc, line=line, col=col,
                     ref=res.get("ruleId", ""),
                     cwe=props.get("cwe"),
                 ))
-    return rows, status(deps=deps)
+    return rows, status(deps=deps, suppressed=suppressed)

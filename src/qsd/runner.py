@@ -12,6 +12,7 @@ import base64
 import datetime as _dt
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -59,6 +60,24 @@ class ConfigError(ValueError):
     pass
 
 
+# Allowlist only: a denylist still lets PR-edited config set javaExePath / scanner.*
+# and run a checkout-supplied binary with SONAR_TOKEN in the environment.
+_SONAR_ARG = re.compile(r"^-Dsonar\.[A-Za-z0-9_.]+=.+$")
+_SONAR_ALLOWED = re.compile(
+    r"^sonar\.("
+    r"sources|tests|exclusions|inclusions|"
+    r"test\.(exclusions|inclusions)|"
+    r"coverage\.exclusions|cpd\.exclusions|"
+    r"scm\.(disabled|exclusions|provider)|"
+    r"javascript\.[A-Za-z0-9_.]+|"
+    r"typescript\.[A-Za-z0-9_.]+|"
+    r"python\.[A-Za-z0-9_.]+|"
+    r"java\.(binaries|libraries|test\.binaries)"
+    r")$"
+)
+SEMGREP_MODES = ("auto", "ci", "public")
+
+
 def log(msg):
     print(f"==> {msg}", file=sys.stderr)
 
@@ -77,11 +96,19 @@ def have(tool):
 
 
 def git_sha(path):
+    """Return (sha, dirty). dirty is True/False, or None when git status is unknown."""
     try:
-        return subprocess.check_output(["git", "-C", path, "rev-parse", "HEAD"],
-                                       text=True, stderr=subprocess.DEVNULL).strip()
+        sha = subprocess.check_output(["git", "-C", path, "rev-parse", "HEAD"],
+                                      text=True, stderr=subprocess.DEVNULL).strip()
     except (OSError, subprocess.CalledProcessError):
-        return ""
+        return "", None
+    try:
+        porcelain = subprocess.check_output(
+            ["git", "-C", path, "status", "--porcelain"],
+            text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return sha, None
+    return sha, bool(porcelain.strip())
 
 
 def _nonempty(path):
@@ -120,6 +147,16 @@ def validate(config, base):
         labels.add(label)
         if not p.get("path") or not os.path.isdir(os.path.join(base, p["path"])):
             raise ConfigError(f"{name}: `path` is not a directory")
+        for arg in p.get("sonar_args") or []:
+            if not _SONAR_ARG.match(str(arg)):
+                raise ConfigError(f"{name}: sonar_args entry {arg!r} must be -Dsonar.<key>=<value>")
+            key = str(arg).split("=", 1)[0][2:]
+            if not _SONAR_ALLOWED.match(key):
+                raise ConfigError(f"{name}: sonar_args entry {arg!r} is not an allowed analysis "
+                                  f"property (no sonar.scanner.*, host, token, or executable overrides)")
+    mode = config.get("semgrep_mode", "auto")
+    if mode not in SEMGREP_MODES:
+        raise ConfigError(f"semgrep_mode must be one of {', '.join(SEMGREP_MODES)}")
 
 
 # --------------------------------------------------------------------------
@@ -183,7 +220,7 @@ class Sonar:
                    {"login": "admin", "previousPassword": "admin",
                     "password": secrets.token_urlsafe(24) + "aA1!"}, self.token, "")
 
-    def scan(self, path, key, logfile):
+    def scan(self, path, key, logfile, extra=()):
         log(f"SonarQube: {key}")
         # Joins the compose network (no host networking), mounts the source
         # read-only, and takes the token from the environment, not argv.
@@ -192,7 +229,9 @@ class Sonar:
                "-e", "SONAR_TOKEN", SCANNER_IMAGE,
                f"-Dsonar.projectKey={key}", "-Dsonar.scm.disabled=true",
                "-Dsonar.working.directory=/tmp/.scannerwork"]
-        if not os.path.exists(os.path.join(path, "sonar-project.properties")):
+        cmd.extend(extra)
+        if not os.path.exists(os.path.join(path, "sonar-project.properties")) \
+                and not any(str(a).startswith("-Dsonar.sources=") for a in extra):
             cmd.append("-Dsonar.sources=.")
         rc = run(cmd, logfile, env={**os.environ, "SONAR_TOKEN": self.token})
         with open(logfile, encoding="utf-8", errors="replace") as fh:
@@ -318,14 +357,25 @@ def scan(config, base, out_dir, version="", tools=TOOLS):
 
     settings = {"snyk_severity": config.get("snyk_severity", "high"),
                 "trivy_severity": config.get("trivy_severity", "CRITICAL,HIGH"),
-                "semgrep": "org policy (semgrep ci)" if os.environ.get("SEMGREP_APP_TOKEN")
-                else "public ruleset"}
+                "semgrep": _semgrep_label(config.get("semgrep_mode", "auto")),
+                "semgrep_mode": config.get("semgrep_mode", "auto"),
+                "tools": ",".join(tools),
+                # Digests actually referenced this run — pin ≠ what ran if PATH wins.
+                "images": {
+                    "sonar_scanner": SCANNER_IMAGE,
+                    "clamav": CLAMAV_IMAGE,
+                    "gitleaks": GITLEAKS_IMAGE,
+                    "osv": OSV_IMAGE,
+                    "zizmor": ZIZMOR_IMAGE,
+                },
+                "runners": {}}
     projects = []
     for p in config["projects"]:
         path = os.path.realpath(os.path.join(base, p["path"]))
+        sha, dirty = git_sha(path)
         projects.append({"cfg": p, "path": path, "name": p["name"], "out": {
             "name": p["name"], "label": p.get("label") or p["name"],
-            "repo": p.get("repo", ""), "commit": git_sha(path), "notes": {}}})
+            "repo": p.get("repo", ""), "commit": sha, "commit_dirty": dirty, "notes": {}}})
 
     shim = _python_shim() if "snyk" in tools else None
     sonar = None
@@ -341,7 +391,8 @@ def scan(config, base, out_dir, version="", tools=TOOLS):
                     sonar.up()
                     for pr in projects:
                         key = pr["cfg"].get("sonar_project_key") or pr["name"]
-                        sonar.scan(pr["path"], key, os.path.join(logs, f"{pr['name']}.sonar.log"))
+                        sonar.scan(pr["path"], key, os.path.join(logs, f"{pr['name']}.sonar.log"),
+                                   pr["cfg"].get("sonar_args") or ())
                     for pr in projects:
                         key = pr["cfg"].get("sonar_project_key") or pr["name"]
                         sonar.wait(key)
@@ -369,6 +420,9 @@ def _scan_project(pr, raw, logs, tools, settings):
     cfg, path, name, out = pr["cfg"], pr["path"], pr["name"], pr["out"]
     notes = out["notes"]
     stem = os.path.join(raw, name)
+    # Tools left out of --tools still appear in `sources` as optional skips, so a
+    # screenshot cannot look like "only these scanners exist".
+    _register_skipped(out, notes, tools, cfg, stem)
 
     def lg(tool):
         return os.path.join(logs, f"{name}.{tool}.log")
@@ -437,7 +491,7 @@ def _scan_project(pr, raw, logs, tools, settings):
         if not have("semgrep"):
             notes["Semgrep"] = "semgrep not on PATH"
         else:
-            _semgrep(cfg, path, out["semgrep"], lg("semgrep"), notes)
+            _semgrep(cfg, path, out["semgrep"], lg("semgrep"), notes, settings["semgrep_mode"])
 
     if "dependabot" in tools:
         out["dependabot"] = f"{stem}-dependabot.json"
@@ -447,41 +501,72 @@ def _scan_project(pr, raw, logs, tools, settings):
             notes["Dependabot"] = "gh not on PATH"
         else:
             log(f"Dependabot: {cfg['repo']}")
-            with open(out["dependabot"], "w") as fh, open(lg("dependabot"), "w") as err:
-                rc = subprocess.run(
-                    ["gh", "api", f"/repos/{cfg['repo']}/dependabot/alerts?state=open&per_page=100",
-                     "--paginate"], stdout=fh, stderr=err).returncode
-            if rc != 0:
-                notes["Dependabot"] = "gh api failed, see logs"
+            # Open findings + dismissed waivers. Fixed alerts are a separate
+            # remediation count in the parser — not "waived".
+            alerts, err = [], ""
+            for state in ("open", "dismissed"):
+                with open(lg(f"dependabot-{state}"), "w") as logfh:
+                    r = subprocess.run(
+                        ["gh", "api",
+                         f"/repos/{cfg['repo']}/dependabot/alerts?state={state}&per_page=100",
+                         "--paginate"], capture_output=True, text=True)
+                if r.returncode != 0:
+                    err = r.stderr.strip() or f"gh api exited {r.returncode}"
+                    break
+                try:
+                    page = json.loads(r.stdout) if r.stdout.strip() else []
+                except json.JSONDecodeError:
+                    err = "gh api returned non-JSON"
+                    break
+                if isinstance(page, list) and page and all(isinstance(a, list) for a in page):
+                    page = [a for chunk in page for a in chunk]
+                if not isinstance(page, list):
+                    err = "gh api returned a non-list"
+                    break
+                alerts.extend(page)
+            if err:
+                notes["Dependabot"] = f"gh api failed, see logs ({err[:120]})"
                 _rm(out["dependabot"])
+            else:
+                with open(out["dependabot"], "w", encoding="utf-8") as fh:
+                    json.dump(alerts, fh)
 
     if "osv" in tools:
         out["osv"] = {"path": f"{stem}-osv.json"}
-        _osv(cfg, path, out["osv"], lg("osv"), notes)
+        _osv(cfg, path, out["osv"], lg("osv"), notes, settings)
 
     if "zizmor" in tools:
         out["zizmor"] = {"path": f"{stem}-zizmor.json"}
-        _zizmor(path, out["zizmor"], lg("zizmor"), notes)
+        _zizmor(path, out["zizmor"], lg("zizmor"), notes, settings)
 
     if "clamav" in tools:
         out["clamav"] = f"{stem}-clamav.txt"
-        _clamav(path, out["clamav"], lg("clamav"), notes)
+        _clamav(path, out["clamav"], lg("clamav"), notes, settings)
 
     if "gitleaks" in tools:
         out["gitleaks"] = f"{stem}-gitleaks.json"
-        _gitleaks(cfg, path, out["gitleaks"], lg("gitleaks"), notes)
+        _gitleaks(cfg, path, out["gitleaks"], lg("gitleaks"), notes, settings)
 
-    if "guarddog" in tools and cfg.get("guarddog"):
-        out["guarddog"] = {}
-        for i, g in enumerate(cfg["guarddog"]):
-            label = g["manifest"]
-            dest = f"{stem}-guarddog-{i}.json"
-            out["guarddog"][label] = {"path": dest, "ecosystem": g["ecosystem"],
-                                      "manifest": g["manifest"]}
-            _guarddog(g, path, dest, lg(f"guarddog-{i}"), notes, f"GuardDog {label}")
+    if "guarddog" in tools:
+        if cfg.get("guarddog"):
+            out["guarddog"] = {}
+            for i, g in enumerate(cfg["guarddog"]):
+                label = g["manifest"]
+                dest = f"{stem}-guarddog-{i}.json"
+                out["guarddog"][label] = {"path": dest, "ecosystem": g["ecosystem"],
+                                          "manifest": g["manifest"]}
+                _guarddog(g, path, dest, lg(f"guarddog-{i}"), notes, f"GuardDog {label}")
+        else:
+            # Still list the source so a missing GuardDog config is not invisible.
+            out["guarddog"] = {"(not configured)": {
+                "path": f"{stem}-guarddog.json", "ecosystem": "", "manifest": "(not configured)"}}
+            notes["GuardDog (not configured)"] = "not configured"
 
     if cfg.get("coverage"):
-        out["coverage"] = _inside(path, cfg["coverage"])
+        # Relative: a file inside the checkout. Absolute: a file produced elsewhere
+        # (a CI artifact, a summary rebuilt from a PR comment); it is only parsed.
+        out["coverage"] = (cfg["coverage"] if os.path.isabs(cfg["coverage"])
+                           else _inside(path, cfg["coverage"]))
 
 
 def _trivy(args, out, logfile, notes, source):
@@ -492,14 +577,30 @@ def _trivy(args, out, logfile, notes, source):
         _rm(out)
 
 
-def _semgrep(cfg, path, out, logfile, notes):
+def _semgrep_label(mode):
+    has_token = bool(os.environ.get("SEMGREP_APP_TOKEN"))
+    if mode == "public" or (mode == "auto" and not has_token):
+        return "public ruleset"
+    return "org policy (semgrep ci)" if has_token else "not scanned: SEMGREP_APP_TOKEN not set"
+
+
+def _semgrep(cfg, path, out, logfile, notes, mode="auto"):
     env = {k: v for k, v in os.environ.items() if k not in _DIFF_AWARE_ENV}
+    if mode == "public":
+        env.pop("SEMGREP_APP_TOKEN", None)
+    if mode == "ci" and not env.get("SEMGREP_APP_TOKEN"):
+        # A trend must not silently switch rulesets under one "Semgrep" label.
+        notes["Semgrep"] = "SEMGREP_APP_TOKEN not set (semgrep_mode is ci)"
+        return
     if env.get("SEMGREP_APP_TOKEN"):
         # `semgrep ci` applies your organisation's policy (Code + Supply Chain).
         if cfg.get("repo"):
+            sha, _ = git_sha(path)
             env.update(SEMGREP_REPO_NAME=cfg["repo"],
                        SEMGREP_REPO_URL=f"https://github.com/{cfg['repo']}",
-                       SEMGREP_COMMIT=git_sha(path))
+                       SEMGREP_COMMIT=sha)
+        if cfg.get("semgrep_branch"):
+            env["SEMGREP_BRANCH"] = str(cfg["semgrep_branch"])
         cmd = ["semgrep", "ci", "--code", "--supply-chain", "--json",
                f"--json-output={out}", "--metrics=off"]
     else:
@@ -512,21 +613,80 @@ def _semgrep(cfg, path, out, logfile, notes):
         _rm(out)
 
 
-def _clamav(path, out, logfile, notes):
+def _register_skipped(out, notes, tools, cfg, stem):
+    """Stub every disabled tool so digest still lists it (optional, not collected)."""
+    skip = "skipped: not in --tools"
+    if "sonarqube" not in tools:
+        out.setdefault("sonarqube", {})
+        notes.setdefault("SonarQube", skip)
+    if "snyk" not in tools:
+        products = {"Open Source": f"{stem}-snyk-oss.json", "Code": f"{stem}-snyk-code.json",
+                    "IaC": f"{stem}-snyk-iac.json"}
+        if cfg.get("image"):
+            products["Container"] = f"{stem}-snyk-container.json"
+        out["snyk"] = products
+        for p in products:
+            notes.setdefault(f"Snyk {p}", skip)
+    if "trivy" not in tools:
+        out["trivy"] = {"Config": f"{stem}-trivy-config.json"}
+        if cfg.get("helm"):
+            out["trivy"]["Chart"] = f"{stem}-trivy-chart.json"
+        for t in out["trivy"]:
+            notes.setdefault(f"Trivy {t}", skip)
+    if "semgrep" not in tools:
+        out["semgrep"] = f"{stem}-semgrep.json"
+        notes.setdefault("Semgrep", skip)
+    if "dependabot" not in tools:
+        out["dependabot"] = f"{stem}-dependabot.json"
+        notes.setdefault("Dependabot", skip)
+    if "osv" not in tools:
+        out["osv"] = {"path": f"{stem}-osv.json"}
+        notes.setdefault("OSV-Scanner", skip)
+    if "zizmor" not in tools:
+        out["zizmor"] = {"path": f"{stem}-zizmor.json"}
+        notes.setdefault("zizmor", skip)
+    if "clamav" not in tools:
+        out["clamav"] = f"{stem}-clamav.txt"
+        notes.setdefault("ClamAV", skip)
+    if "gitleaks" not in tools:
+        out["gitleaks"] = f"{stem}-gitleaks.json"
+        notes.setdefault("Gitleaks", skip)
+    if "guarddog" not in tools:
+        if cfg.get("guarddog"):
+            out["guarddog"] = {}
+            for i, g in enumerate(cfg["guarddog"]):
+                label = g["manifest"]
+                out["guarddog"][label] = {"path": f"{stem}-guarddog-{i}.json",
+                                          "ecosystem": g["ecosystem"], "manifest": label}
+                notes.setdefault(f"GuardDog {label}", skip)
+        else:
+            out["guarddog"] = {"(not configured)": {
+                "path": f"{stem}-guarddog.json", "ecosystem": "", "manifest": "(not configured)"}}
+            notes.setdefault("GuardDog (not configured)", skip)
+
+
+def _clamav(path, out, logfile, notes, settings=None):
     """Native clamscan when it has a database; otherwise the official image,
     which refreshes its signatures in the same container before scanning."""
     native = have("clamscan") and _clamav_db_ready()
     if native:
         cmd, cwd = ["clamscan", "-r", "--infected", "--no-summary", "--stdout", "."], path
+        runner = "native"
     elif have("docker"):
+        # freshclam failure must not silently look like a clean scan: the marker
+        # line is what the parser turns into an incomplete source.
         cmd = ["docker", "run", "--rm", "--platform", "linux/amd64", "--entrypoint", "sh",
                "-v", f"{path}:/scan:ro", CLAMAV_IMAGE, "-c",
-               "freshclam --quiet >/dev/null 2>&1; cd /scan && "
-               "clamscan -r --infected --no-summary --stdout ."]
+               "if ! freshclam --quiet >/dev/null 2>&1; then "
+               "echo '# qsd: freshclam failed'; fi; "
+               "cd /scan && clamscan -r --infected --no-summary --stdout ."]
         cwd = None
+        runner = "container"
     else:
         notes["ClamAV"] = "neither clamscan (with a database) nor docker available"
         return
+    if settings is not None:
+        settings.setdefault("runners", {})["clamav"] = runner
     log("ClamAV: " + ("clamscan" if native else "clamav/clamav container"))
     with open(out, "w", encoding="utf-8") as fh, open(logfile, "w") as err:
         fh.write(f"# qsd clamav {'native' if native else CLAMAV_IMAGE}\n")
@@ -564,7 +724,7 @@ def _guarddog(g, path, out, logfile, notes, source):
         _rm(out)
 
 
-def _gitleaks(cfg, path, out, logfile, notes):
+def _gitleaks(cfg, path, out, logfile, notes, settings=None):
     """Full git history when the checkout is a repository, the files otherwise.
 
     The free MIT CLI needs no licence key (only gitleaks-action does, for
@@ -582,7 +742,7 @@ def _gitleaks(cfg, path, out, logfile, notes):
     if mode == "git" and cfg.get("gitleaks_log_opts"):
         args.append(f"--log-opts={cfg['gitleaks_log_opts']}")
     if have("gitleaks"):
-        cmd, target = ["gitleaks", mode, path, "--report-path", out, *args], None
+        cmd, target, runner = ["gitleaks", mode, path, "--report-path", out, *args], None, "native"
         log(f"Gitleaks: {mode} (native)")
     elif have("docker"):
         # The report goes to stdout so the container never writes to the host.
@@ -590,11 +750,13 @@ def _gitleaks(cfg, path, out, logfile, notes):
                "-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=safe.directory",
                "-e", "GIT_CONFIG_VALUE_0=*", "-v", f"{path}:/repo:ro", GITLEAKS_IMAGE,
                mode, "/repo", "--report-path", "/dev/stdout", *args]
-        target = out
+        target, runner = out, "container"
         log(f"Gitleaks: {mode} (container)")
     else:
         notes["Gitleaks"] = "neither gitleaks nor docker available"
         return
+    if settings is not None:
+        settings.setdefault("runners", {})["gitleaks"] = runner
     if target:
         with open(target, "w") as fh, open(logfile, "w") as err:
             rc = subprocess.run(cmd, stdout=fh, stderr=err).returncode
@@ -606,14 +768,15 @@ def _gitleaks(cfg, path, out, logfile, notes):
 
 
 def _native_or_container(tool, image, path, args, target_args):
-    """(cmd, root): the native CLI on `path`, else the pinned image with the
+    """(cmd, root, runner): the native CLI on `path`, else the pinned image with the
     checkout mounted read-only. Output always goes to stdout."""
     if have(tool):
-        return [tool, *args, *target_args(path)], path
+        return [tool, *args, *target_args(path)], path, "native"
     if have("docker"):
         return (["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
-                 "-v", f"{path}:/src:ro", image, *args, *target_args("/src")], "/src")
-    return None, None
+                 "-v", f"{path}:/src:ro", image, *args, *target_args("/src")], "/src",
+                "container")
+    return None, None, None
 
 
 def _capture(cmd, out, logfile):
@@ -629,7 +792,7 @@ def _log_has(logfile, text):
         return False
 
 
-def _osv(cfg, path, spec, logfile, notes):
+def _osv(cfg, path, spec, logfile, notes, settings=None):
     """Queries osv.dev with package names and versions (not code). Set
     `osv_offline` to use downloaded databases instead (native CLI only)."""
     args = ["scan", "source", "-r", "--format", "json"]
@@ -638,10 +801,12 @@ def _osv(cfg, path, spec, logfile, notes):
             notes["OSV-Scanner"] = "osv_offline needs the native osv-scanner"
             return
         args += ["--offline-vulnerabilities", "--download-offline-databases"]
-    cmd, root = _native_or_container("osv-scanner", OSV_IMAGE, path, args, lambda t: [t])
+    cmd, root, runner = _native_or_container("osv-scanner", OSV_IMAGE, path, args, lambda t: [t])
     if not cmd:
         notes["OSV-Scanner"] = "neither osv-scanner nor docker available"
         return
+    if settings is not None:
+        settings.setdefault("runners", {})["osv"] = runner
     log(f"OSV-Scanner: {cfg['name']}")
     spec["root"] = root
     rc = _capture(cmd, spec["path"], logfile)
@@ -653,14 +818,16 @@ def _osv(cfg, path, spec, logfile, notes):
     _rm(spec["path"])
 
 
-def _zizmor(path, spec, logfile, notes):
+def _zizmor(path, spec, logfile, notes, settings=None):
     """Offline audits only: no GitHub token, nothing leaves the machine. With
     --no-exit-codes a run that finds problems exits 0, so nonzero is a failure."""
     args = ["--offline", "--no-exit-codes", "--format", "json"]
-    cmd, root = _native_or_container("zizmor", ZIZMOR_IMAGE, path, args, lambda t: [t])
+    cmd, root, runner = _native_or_container("zizmor", ZIZMOR_IMAGE, path, args, lambda t: [t])
     if not cmd:
         notes["zizmor"] = "neither zizmor nor docker available"
         return
+    if settings is not None:
+        settings.setdefault("runners", {})["zizmor"] = runner
     log("zizmor: GitHub Actions workflows")
     spec["root"] = root
     rc = _capture(cmd, spec["path"], logfile)

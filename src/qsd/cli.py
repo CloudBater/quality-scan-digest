@@ -48,8 +48,12 @@ def _passes(arg):
 def _common(p):
     p.add_argument("--dedup", type=_passes, default=DEFAULT_PASSES,
                    help="comma list of passes: exact,advisory (default), sast (opt-in), or 'none'")
-    p.add_argument("--strict", action="store_true",
-                   help="exit 2 unless every listed source was collected completely")
+    # Strict is the default: a release console that screenshots zero under a gap is worse
+    # than a failing exit. --lenient is for local exploration of partial runs.
+    p.add_argument("--strict", action=argparse.BooleanOptionalAction, default=True,
+                   help="exit 2 unless every required source was collected completely (default)")
+    p.add_argument("--lenient", action="store_true",
+                   help="alias for --no-strict: allow incomplete sources")
 
 
 def main(argv=None):
@@ -108,12 +112,20 @@ def main(argv=None):
         sys.exit(f"error: {exc}")
 
     collected, complete, total = counts
+    if getattr(a, "lenient", False):
+        a.strict = False
     if collected == 0:
         sys.exit("error: no sources collected - this report would be misleading")
-    if a.strict and complete < total:
-        print(f"error: --strict: {total - complete} source(s) not collected completely",
-              file=sys.stderr)
-        sys.exit(2)
+    if a.strict:
+        # Optional sources (skipped via --tools) do not fail the gate.
+        required = [(n, v) for n, v in payload["sources"].items() if not v.get("optional")]
+        gaps = [(n, v) for n, v in required if not v["complete"]]
+        if gaps:
+            print(f"error: --strict: {len(gaps)} required source(s) not collected completely",
+                  file=sys.stderr)
+            for n, v in gaps:
+                print(f"  {n} - {v['note']}", file=sys.stderr)
+            sys.exit(2)
 
 
 def _resolve(manifest, base):

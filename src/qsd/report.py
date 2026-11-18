@@ -9,7 +9,7 @@ import os
 
 from . import __version__
 from .dedup import DEFAULT_PASSES, dedup
-from .model import fingerprint, is_security, rank, safe_name
+from .model import fingerprint, is_malware, is_security, rank, safe_name, track_key
 from .parsers import clamav as p_clamav
 from .parsers import coverage as p_coverage
 from .parsers import dependabot as p_dependabot
@@ -22,7 +22,9 @@ from .parsers import sonarqube as p_sonar
 from .parsers import trivy as p_trivy
 from .parsers import zizmor as p_zizmor
 
-SCHEMA_VERSION = "1.0"
+# Bump when the payload shape or enum set changes. Consumers pin on this, not the
+# package version: v0.3.0 already grew under schema 1.0 without a signal.
+SCHEMA_VERSION = "1.1"
 
 
 class ManifestError(ValueError):
@@ -55,6 +57,9 @@ def validate(manifest):
         p["name"], p["label"] = name, label
         for k in ("repo", "commit"):
             p[k] = _s(p.get(k))
+        # None = unknown (git status failed); do not coerce that into "clean".
+        dirty = p.get("commit_dirty", False)
+        p["commit_dirty"] = None if dirty is None else bool(dirty)
     manifest["title"] = _s(manifest.get("title"))
     manifest["version"] = _s(manifest.get("version"))
     return manifest
@@ -74,11 +79,16 @@ def collect_project(cfg, sonar_token=""):
     run_notes = cfg.get("notes") or {}
     rows, sources, measures, deps, dbot = [], {}, {}, None, None
 
-    def record(source, st):
-        sources[f"{label}: {source}"] = {"collected": bool(st["ok"]),
-                                         "complete": bool(st["ok"]) and st.get(
-                                             "complete", not st["note"]),
-                                         "note": st["note"]}
+    def record(source, st, optional=False):
+        note = st["note"]
+        opt = optional or bool(st.get("optional")) or note.startswith("skipped:")
+        sources[f"{label}: {source}"] = {
+            "collected": bool(st["ok"]),
+            "complete": bool(st["ok"]) and st.get("complete", not st["note"]),
+            "note": note,
+            "suppressed": int(st.get("suppressed") or 0),
+            "optional": opt,
+        }
 
     def missing(source, default="not scanned"):
         record(source, {"ok": False, "note": run_notes.get(source, default)})
@@ -159,6 +169,7 @@ def collect_project(cfg, sonar_token=""):
             record("Coverage", {"ok": cov is not None, "note": note})
 
     summary = {"project_id": pid, "project": label, "repo": cfg["repo"], "commit": cfg["commit"],
+               "commit_dirty": cfg.get("commit_dirty", False),
                "sonar": measures, "coverage": cov, "dependabot": dbot, "deps": deps}
     return rows, summary, sources
 
@@ -174,17 +185,23 @@ def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES):
         sources.update(src)
 
     rows, stats = dedup(raw, passes or ())
-    seen = {}
+    seen_id = {}
     for r in rows:
+        # track_key needs private fields; strip them after. No encounter-order
+        # suffix: identity must not flip when siblings reorder or drop out.
+        r["track"] = track_key(r)
         r.pop("_package", None)
         r.pop("_eco", None)
+        r.pop("_track", None)
         r["rank"] = rank(r["sev"])
+
         fid = fingerprint(r)
-        n = seen.get(fid, 0)
-        seen[fid] = n + 1
+        n = seen_id.get(fid, 0)
+        seen_id[fid] = n + 1
         # Identical content twice (exact pass off) still gets two distinct ids.
         r["id"] = fid if n == 0 else f"{fid}-{n + 1}"
-    rows.sort(key=lambda r: (r["rank"], r["proj"], r["src"], r["loc"], str(r["line"])))
+    rows.sort(key=lambda r: (r["rank"], r["proj"], r["src"], r["loc"], str(r["line"]),
+                             str(r.get("col", ""))))
 
     for s in summaries:
         mine = [r for r in rows if r["project_id"] == s["project_id"]]
@@ -197,6 +214,9 @@ def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES):
             "findings": len(mine),
             "security": len(sec),
             "sec_crit_high": sum(1 for r in sec if r["rank"] <= 1),
+            # Unrated security (sev "—", rank 5) is invisible from the crit/high gate.
+            "sec_unrated": sum(1 for r in sec if r["rank"] >= 5),
+            "malware": sum(1 for r in mine if is_malware(r)),
             # Sightings per scanner: a merged row counts under each, so these do not sum.
             "by_source": by_source,
             # Kept for consumers of the original payload shape.

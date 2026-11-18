@@ -33,7 +33,7 @@ def load(path, label, project_id=None):
             sev=SEV.get(str(extra.get("severity", "")).upper(), "—"),
             msg=(extra.get("message") or "").strip(),
             loc=r.get("path", ""),
-            line=(r.get("start") or {}).get("line"),
+            line=(r.get("start") or {}).get("line"), col=(r.get("start") or {}).get("col"),
             ref=r.get("check_id", ""),
             fix=meta.get("shortlink") or "",
             ids=_as_list(meta.get("cve")) + _as_list(meta.get("ghsa")),
@@ -42,14 +42,14 @@ def load(path, label, project_id=None):
         ))
 
     # Errors and results are independent: findings from some files do not make
-    # up for files that failed to scan. `warn` (a file only partly parsed) is
-    # recorded but does not make the source incomplete; anything else does.
+    # up for files that failed or only partly parsed. A partial parse is still a
+    # coverage gap — counting it complete would paint a green zero under a hole.
     errs = doc.get("errors") or []
     hard = [e for e in errs if str(e.get("level", "error")).lower() != "warn"]
     warns = len(errs) - len(hard)
     notes = ([f"incomplete: {len(hard)} scan error(s)"] if hard else []) + \
-        ([f"{warns} file(s) only partly parsed"] if warns else [])
-    return rows, status(note="; ".join(notes), complete=not hard)
+        ([f"incomplete: {warns} file(s) only partly parsed"] if warns else [])
+    return rows, status(note="; ".join(notes), complete=not errs)
 
 
 def _as_list(v):

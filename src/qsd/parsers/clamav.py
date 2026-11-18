@@ -16,9 +16,13 @@ def load(path, label, project_id=None):
     except OSError as exc:
         return failed(f"clamav output unreadable ({exc.__class__.__name__})")
 
-    rows, errors = [], 0
+    rows, errors, freshclam_failed = [], 0, False
     for line in lines:
-        if not line.strip() or line.startswith("#"):
+        if not line.strip():
+            continue
+        if line.startswith("#"):
+            if "freshclam failed" in line.lower():
+                freshclam_failed = True
             continue
         if line.endswith(" FOUND") and ": " in line:
             file_, sig = line[:-len(" FOUND")].rsplit(": ", 1)
@@ -31,4 +35,10 @@ def load(path, label, project_id=None):
             ))
         elif "ERROR" in line or "Can't" in line:
             errors += 1
-    return rows, status(note=f"incomplete: {errors} file(s) could not be scanned" if errors else "")
+    notes = []
+    if freshclam_failed:
+        notes.append("incomplete: freshclam failed; signatures may be stale or missing")
+    if errors:
+        notes.append(f"incomplete: {errors} file(s) could not be scanned")
+    note = "; ".join(notes)
+    return rows, status(note=note, complete=not note)

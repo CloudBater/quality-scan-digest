@@ -8,14 +8,18 @@ whose `also` keeps every other sighting in full, so nothing is lost.
 Every pass is conservative on purpose: a wrong merge hides a finding, a missed
 merge only over-counts.
 
-  exact     same project, source, kind, rule, location, line and message
-  advisory  same project and package (ecosystem-aware) and a shared CVE/GHSA id.
-            Rows with no package never bridge two packages.
+  exact     same project, source, kind, rule, location, line, column and message
+  advisory  same project and package (ecosystem-aware) and a shared CVE/GHSA id,
+            reported by DIFFERENT scanners. Rows with no package never bridge two
+            packages.
   sast      OFF by default. Same project, file, line and CWE, reported by
             DIFFERENT scanners; each row joins at most one group, so findings
             never chain into each other.
 
-Nothing is merged across projects (keyed by project id, not display label).
+Nothing is merged across projects (keyed by project id, not display label), and a
+group never holds two rows from the same scanner: a tool's own separate findings are
+its own determination (Snyk files one CVE under several ids, one per affected range),
+and only a second scanner agreeing is evidence of a duplicate.
 """
 
 from .model import rank
@@ -28,7 +32,7 @@ CODE_KINDS = {"Vulnerability", "Security Hotspot", "Bug", "Code Smell"}
 DEFAULT_PASSES = ("exact", "advisory")
 ALL_PASSES = ("exact", "advisory", "sast")
 
-_SIGHTING = ("src", "kind", "sev", "msg", "loc", "line", "ref", "fix", "ids", "cwe")
+_SIGHTING = ("src", "kind", "sev", "msg", "loc", "line", "col", "ref", "fix", "ids", "cwe")
 
 
 class _UF:
@@ -94,7 +98,9 @@ def _norm_path(p):
 def exact(rows):
     uf, first = _UF(len(rows)), {}
     for i, r in enumerate(rows):
-        key = (r["project_id"], r["src"], r["kind"], r["ref"], r["loc"], str(r["line"]), r["msg"])
+        # Column is part of the key: two smells of one rule on one line are two findings.
+        key = (r["project_id"], r["src"], r["kind"], r["ref"], r["loc"],
+               str(r["line"]), str(r.get("col", "")), r["msg"])
         if key in first:
             uf.union(first[key], i)
         else:
@@ -115,6 +121,15 @@ def _compatible(a, b):
 
 def advisory(rows):
     uf = _UF(len(rows))
+    scanners = {i: set(r.get("by") or [r["src"]]) for i, r in enumerate(rows)}
+
+    def join(a, b):
+        ra, rb = uf.find(a), uf.find(b)
+        if ra == rb or scanners[ra] & scanners[rb]:
+            return  # never merge two rows one scanner reported separately
+        uf.union(ra, rb)
+        scanners[uf.find(ra)] = scanners[ra] | scanners[rb]
+
     known = [i for i, r in enumerate(rows) if r.get("ids") and r.get("_package")]
     unknown = [i for i, r in enumerate(rows) if r.get("ids") and not r.get("_package")]
 
@@ -124,7 +139,7 @@ def advisory(rows):
         for adv in rows[i]["ids"]:
             for j in by_id.get((rows[i]["project_id"], adv), []):
                 if _compatible(_pkg_key(rows[i]), _pkg_key(rows[j])):
-                    uf.union(i, j)
+                    join(i, j)
             by_id.setdefault((rows[i]["project_id"], adv), []).append(i)
 
     # 2. A row with no package joins only if every id it carries leads to one
@@ -135,7 +150,7 @@ def advisory(rows):
             for j in by_id.get((rows[i]["project_id"], adv), []):
                 roots.add(uf.find(j))
         if len(roots) == 1:
-            uf.union(i, roots.pop())
+            join(i, roots.pop())
     return _apply(rows, uf)
 
 

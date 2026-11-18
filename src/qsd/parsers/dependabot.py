@@ -1,7 +1,13 @@
-"""Dependabot: open alerts from `gh api /repos/{owner}/{repo}/dependabot/alerts`."""
+"""Dependabot: alerts from `gh api /repos/{owner}/{repo}/dependabot/alerts`.
+
+Open alerts become findings. Dismissed / auto_dismissed alerts count as
+`suppressed` (waived). Fixed alerts are counted separately and are not "waived".
+"""
 
 from ..model import finding
 from . import failed, read_json, status, unreadable
+
+_WAIVED = {"dismissed", "auto_dismissed"}
 
 
 def load(path, label, project_id=None):
@@ -16,9 +22,16 @@ def load(path, label, project_id=None):
         msg = alerts.get("message", "") if isinstance(alerts, dict) else ""
         return failed(f"not a list of alerts{': ' + msg if msg else ''}")
 
-    by_sev, rows, seen = {}, [], set()
+    by_sev, rows, seen, suppressed, fixed = {}, [], set(), 0, 0
     for a in alerts:
-        if a.get("state", "open") != "open":
+        state = a.get("state", "open")
+        if state in _WAIVED:
+            suppressed += 1
+            continue
+        if state == "fixed":
+            fixed += 1
+            continue
+        if state != "open":
             continue
         adv = a.get("security_advisory") or {}
         vuln = a.get("security_vulnerability") or {}
@@ -34,16 +47,18 @@ def load(path, label, project_id=None):
             continue
         seen.add((manifest, pkg, ghsa))
         cve = [i.get("value") for i in adv.get("identifiers") or [] if i.get("type") == "CVE"]
-        fixed = (vuln.get("first_patched_version") or {}).get("identifier", "")
+        patched = (vuln.get("first_patched_version") or {}).get("identifier", "")
         pkg_loc = f"{pkg}@{vuln.get('vulnerable_version_range', '')}".strip("@")
         rows.append(finding(
             project_id=project_id, proj=label, src="Dependabot", kind="Dependency",
             sev=sev, msg=adv.get("summary", ""),
             loc=f"{manifest}: {pkg_loc}" if manifest else pkg_loc,
-            ref=ghsa, fix=f"upgrade to {fixed}" if fixed else "no fix",
+            ref=ghsa, fix=f"upgrade to {patched}" if patched else "no fix",
             ids=cve + [ghsa],
             cwe=[c.get("cwe_id") for c in adv.get("cwes") or []],
             package=pkg, ecosystem=eco,
         ))
-    counts = {"total": sum(by_sev.values()), "unique": len(rows), "by_sev": by_sev}
-    return rows, status(counts=counts)
+    counts = {"total": sum(by_sev.values()), "unique": len(rows), "by_sev": by_sev,
+              "fixed": fixed}
+    # Fixed alerts live in counts only — a note would mark the source incomplete.
+    return rows, status(counts=counts, suppressed=suppressed)
