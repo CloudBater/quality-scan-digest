@@ -330,7 +330,7 @@ class EndToEnd(unittest.TestCase):
     def test_backward_compatible_shape(self):
         for k in ("title", "version", "generated_from", "sources", "findings", "schema_version"):
             self.assertIn(k, self.p)
-        self.assertEqual(self.p["schema_version"], "1.1")
+        self.assertEqual(self.p["schema_version"], "1.2")
         for k in ("proj", "src", "kind", "sev", "msg", "loc", "line", "col", "ref", "fix",
                   "rank", "by", "id", "track"):
             self.assertIn(k, self.p["findings"][0])
@@ -493,7 +493,7 @@ class Cli(unittest.TestCase):
                 p = json.load(fh)
             self.assertEqual((p["version"], len(p["findings"]), p["settings"]["dedup"]),
                              ("v9", 21, "exact,advisory"))
-            self.assertEqual(p["schema_version"], "1.1")
+            self.assertEqual(p["schema_version"], "1.2")
             r = self.run_cli("digest", fx("manifest.json"), "--json-out", out, "--strict")
             self.assertEqual(r.returncode, 2)
 

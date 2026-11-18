@@ -176,29 +176,83 @@ Snyk IaC and Trivy use unrelated rule catalogues, so misconfigurations are not m
 Choose passes with `--dedup exact,advisory,sast` or turn it off with `--dedup none`.
 Parsers themselves keep every affected version and manifest.
 
+## Waivers (`.qsdignore`)
+
+Most findings in a large scan are not actionable: a rule that matches an audit-log sentence as
+SQL, a hardening note, a vulnerability that already has a ticket. A waiver file sets them aside
+without hiding them. Pass it explicitly (`--ignore-file path`, or `"ignore_file"` in the
+config); see [`examples/qsdignore.example`](examples/qsdignore.example).
+
+```
+ignore src=Semgrep ref="python.django.security.injection.tainted-sql-string.*" loc="app/audit/**" expect=16 until=2027-05-01 reason="audit-log text, not SQL"
+track  ref=GHSA-xxxx-xxxx-xxxx loc="*: example-package@1.2.3" ticket=PROJ-123 until=2027-02-01 reason="upgrade scheduled"
+```
+
+| Verb | Meaning | In the headline counts |
+|---|---|---|
+| `ignore` | A false positive or an accepted risk | No; listed under "Waived" |
+| `track` | A real finding that already has a ticket | Yes, labelled with the ticket |
+
+The report adds one number that answers the question that matters: `untracked_crit_high`,
+security findings of CRITICAL or HIGH with neither a waiver nor a ticket.
+
+- **A waived finding never disappears.** It stays in `findings` with a `waiver`
+  (`status`, `reason`, `ticket`, `until`, `line`).
+- **Every line has a `reason` and an `until` date**, at most 12 months ahead. After it the finding
+  counts again, and a strict run exits 2.
+- **HIGH and above need a `ticket`**, and so does every `track`. A line that breaks this or the
+  secrets rule below is an error on that line: it waives nothing and a strict run exits 2, but the
+  report is still written (new code in the scanned repository cannot stop the report).
+- **A line that matches everything** (`ref` or `loc` made only of `*` or `?`, with no `src` or
+  `track`) must carry `expect=N`.
+- **`expect=N`**: if the line ever matches more than N findings it waives none of them and a strict
+  run exits 2, so "ignore this rule" cannot quietly cover new, real findings.
+- **Secrets and malware** can only be waived one by one, with `track=<the finding's track key>`,
+  never by a pattern. That includes a row where another scanner's sighting was merged in, and a
+  finding whose rule or message looks like a secret (secret, password, token, API key, credential,
+  private key, hard-coded), whatever kind its scanner gave it. `src=` waives a row only if no other
+  scanner also saw it.
+- **Stale lines** (matching nothing) are listed in `waivers.stale`. The file's SHA-256 is recorded.
+- Matchers: `src`, `ref` (rule or advisory id), `loc` (path or `package@version`), `project` (the
+  project `name`, not its label), and the exact `track` key. In `ref` and `loc`, `*` and `?` stay inside one path
+  segment, `**` crosses `/`, and every other character, `[` included, is literal. No line numbers:
+  they drift. Locations are compared as the scanner reported them (Semgrep reports `./app/x.py`, so
+  write `loc="**/x.py"` or `loc="./app/**"`). `until` is a UTC date and is still valid on that day.
+  A `#` starts a comment only at the start of a word, so `ticket=org/repo#12` is safe.
+- **The file is never read from a scanned checkout**, and for `qsd scan` an `ignore_file` (config
+  key or `--ignore-file`) inside the project directory or the git repository it sits in is refused;
+  otherwise a pull request could waive its own finding. `qsd digest` has no checkout path to compare
+  against, so the file you pass there is trusted. A bad file fails `scan` before any scanner runs. Keep it in the repository that owns the
+  scan configuration, reviewed by whoever owns security.
+
+It does not replace the tools' own suppressions (counted under `sources.*.suppressed`).
+
 ## Output
 
 [`schema/report.schema.json`](schema/report.schema.json) describes the payload:
 
 ```jsonc
 {
-  "schema_version": "1.1",
-  "generator": { "name": "quality-scan-digest", "version": "0.4.0" },
+  "schema_version": "1.2",
+  "generator": { "name": "quality-scan-digest", "version": "0.5.0" },
   "title": "…", "version": "v1.4.0", "generated_at": "…",
   "settings": { "snyk_severity": "high", "trivy_severity": "CRITICAL,HIGH", "dedup": "exact,advisory",
                 "tools": "…", "images": {…}, "runners": { "clamav": "container" } },
   "generated_from": [ { "project_id": "api", "project": "API", "repo": "…", "commit": "…",
                         "commit_dirty": false, "sonar": {…}, "coverage": {…}, "dependabot": {…},
                         "findings": 120, "security": 40, "sec_crit_high": 3, "sec_unrated": 1,
-                        "malware": 2, "by_source": {…} } ],
+                        "malware": 2, "waived": 5, "tracked": 1, "untracked_crit_high": 2,
+                        "by_source": {…} } ],
   "sources": { "API: Semgrep": { "collected": true, "complete": true,
                                  "note": "PARTIAL SCAN: 88 file(s) only partly parsed, so Semgrep did not fully scan them (the rest of the repository was scanned)", "suppressed": 0, "partial": 88, "optional": false } },
+  "waivers": { "file": ".qsdignore", "sha256": "…", "lines": […], "stale": [], "expired": [], "errors": [] },
   "dedup":   { "input": 180, "passes": ["exact", "advisory"], "exact": 4, "advisory": 56, "output": 120 },
   "findings": [ { "id": "…", "track": "…", "project_id": "api", "proj": "API", "src": "Snyk",
                   "by": ["Snyk", "Dependabot"], "kind": "Dependency", "security": true,
                   "sev": "HIGH", "rank": 1, "msg": "…", "loc": "poetry.lock: django@4.2.0",
                   "line": "", "col": "", "ref": "SNYK-…", "ids": ["CVE-…"], "cwe": ["CWE-89"],
-                  "fix": "upgrade to …", "also": [ { "src": "Dependabot", "sev": "MEDIUM", "msg": "…" } ] } ]
+                  "fix": "upgrade to …", "also": [ { "src": "Dependabot", "sev": "MEDIUM", "msg": "…" } ],
+                  "waiver": null } ]
 }
 ```
 

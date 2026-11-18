@@ -10,11 +10,12 @@
     "generated_from",
     "sources",
     "dedup",
-    "findings"
+    "findings",
+    "waivers"
   ],
   "properties": {
     "schema_version": {
-      "const": "1.1"
+      "const": "1.2"
     },
     "generator": {
       "type": "object",
@@ -128,6 +129,98 @@
     "settings": {
       "type": "object",
       "description": "Severity floors, rulesets, digests and runners the scan ran with"
+    },
+    "waivers": {
+      "description": "null when no waiver file was used",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "file",
+            "sha256",
+            "lines",
+            "stale",
+            "expired",
+            "errors"
+          ],
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Base name only"
+            },
+            "sha256": {
+              "type": "string"
+            },
+            "lines": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "line": {
+                    "type": "integer"
+                  },
+                  "status": {
+                    "enum": [
+                      "ignore",
+                      "track"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "ticket": {
+                    "type": "string"
+                  },
+                  "until": {
+                    "type": "string"
+                  },
+                  "expect": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "matched": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "line",
+                  "status",
+                  "reason",
+                  "ticket",
+                  "until",
+                  "expect",
+                  "matched"
+                ]
+              }
+            },
+            "stale": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "description": "Lines that matched nothing"
+            },
+            "expired": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            "errors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Expired lines and lines over their `expect`; a strict run exits 2"
+            }
+          }
+        }
+      ]
     }
   },
   "$defs": {
@@ -159,7 +252,10 @@
         "security",
         "sec_crit_high",
         "sec_unrated",
-        "malware"
+        "malware",
+        "waived",
+        "tracked",
+        "untracked_crit_high"
       ],
       "properties": {
         "project": {
@@ -248,6 +344,18 @@
         },
         "project_id": {
           "type": "string"
+        },
+        "waived": {
+          "type": "integer",
+          "description": "Findings with an `ignore` waiver: in `findings`, not counted"
+        },
+        "tracked": {
+          "type": "integer",
+          "description": "Counted findings that have a `track` waiver (a ticket)"
+        },
+        "untracked_crit_high": {
+          "type": "integer",
+          "description": "Security findings of rank CRITICAL or HIGH with neither a waiver nor a ticket"
         }
       }
     },
@@ -272,7 +380,8 @@
         "ids",
         "cwe",
         "security",
-        "also"
+        "also",
+        "waiver"
       ],
       "properties": {
         "id": {
@@ -416,6 +525,46 @@
         },
         "security": {
           "type": "boolean"
+        },
+        "waiver": {
+          "description": "null, or why this finding is waived. `ignore`: a false positive or accepted risk, left out of the headline counts. `track`: a real finding with a ticket, still counted.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "status",
+                "reason",
+                "ticket",
+                "until",
+                "line"
+              ],
+              "properties": {
+                "status": {
+                  "enum": [
+                    "ignore",
+                    "track"
+                  ]
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "ticket": {
+                  "type": "string"
+                },
+                "until": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "line": {
+                  "type": "integer",
+                  "description": "Line in the waiver file"
+                }
+              }
+            }
+          ]
         }
       }
     }

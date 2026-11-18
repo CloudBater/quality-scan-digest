@@ -25,6 +25,7 @@ import urllib.request
 from importlib import resources
 
 from .model import safe_name
+from .waivers import load as waiver_load
 from .parsers.sonarqube import MEASURE_KEYS, Forbidden, SonarError, api, fetch_all, waived_count
 
 TOOLS = ("sonarqube", "snyk", "trivy", "semgrep", "dependabot", "osv", "zizmor", "clamav",
@@ -225,6 +226,36 @@ def _reject_dangerous_sonar_properties(path):
                              f"checkout-supplied program or send the token elsewhere")
 
 
+def _is_inside(path, root):
+    """Whether `path` is `root` or below it, compared by file identity so that letter case on a
+    case-insensitive file system, symlinks and `..` cannot give a different answer."""
+    here = os.path.realpath(path)
+    while True:
+        try:
+            if os.path.samefile(here, root):
+                return True
+        except OSError:
+            pass
+        parent = os.path.dirname(here)
+        if parent == here:
+            return False
+        here = parent
+
+
+def _roots(path):
+    """The project directory, and the top of the git checkout it sits in (a project can be a
+    subdirectory of a repository whose other files a pull request can change too)."""
+    out = [path]
+    try:
+        top = subprocess.run(["git", "-C", path, "rev-parse", "--show-toplevel"], capture_output=True,
+                             text=True, timeout=20).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        top = ""
+    if top:
+        out.append(top)
+    return out
+
+
 def validate(config, base):
     projects = config.get("projects")
     if not isinstance(projects, list) or not projects:
@@ -248,6 +279,20 @@ def validate(config, base):
             if key not in _SONAR_ALLOWED:
                 raise ConfigError(f"{name}: sonar_args entry {arg!r} is not an allowed analysis "
                                   f"property (exact allowlist only; no wildcards or executables)")
+    ignore = config.get("ignore_file")
+    if ignore is not None:
+        if not isinstance(ignore, str) or not ignore:
+            raise ConfigError("ignore_file must be a path")
+        where = os.path.realpath(os.path.join(base, ignore))
+        if not os.path.isfile(where):
+            raise ConfigError(f"ignore_file {ignore!r} is not a file")
+        # Parsed now, so a bad file fails before any scanner runs.
+        waiver_load(where, _dt.datetime.now(_dt.timezone.utc).date())
+        for p in projects:
+            if any(_is_inside(where, root) for root in _roots(os.path.join(base, p["path"]))):
+                raise ConfigError(f"ignore_file is inside the scanned checkout of {p['name']!r}; "
+                                  f"a change to that code could then waive its own findings. "
+                                  f"Keep it in the repository that owns the scan configuration.")
     partial = config.get("semgrep_partial_is_gap", False)
     if not isinstance(partial, bool):
         raise ConfigError("semgrep_partial_is_gap must be true or false")
@@ -545,6 +590,8 @@ def scan(config, base, out_dir, version="", tools=TOOLS):
 
     manifest = {"title": config.get("title", ""), "version": version, "settings": settings,
                 "projects": [pr["out"] for pr in projects]}
+    if config.get("ignore_file"):
+        manifest["ignore_file"] = os.path.realpath(os.path.join(base, config["ignore_file"]))
     return manifest, run_dir
 
 
