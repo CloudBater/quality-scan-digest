@@ -80,6 +80,7 @@ qsd scan examples/qsd.example.json --release v1.4.0 --out-dir qsd-out
 | `coverage` | 覆蓋率檔案：checkout 內相對路徑，或 CI artifact 的絕對路徑（只解析） |
 | `sonar_args` | 額外的 `-Dsonar.<允許的鍵>=…` 分析參數（sources、exclusions、語言設定、`sourceEncoding`、`projectName`；不可覆寫 scanner／host／token／可執行檔） |
 | `semgrep_mode` | `auto`（預設）、`ci`（必須有 token，絕不退回公開規則）、或 `public` |
+| `semgrep_partial_is_gap` | `true` 時，Semgrep 只能部分解析的檔案算缺口（`incomplete`）；預設 `false`：只是備註，來源仍算完整。Semgrep 的嚴重錯誤一律算不完整 |
 | `semgrep_branch` | 每個專案：`semgrep ci` 把這次掃描歸到哪個分支名稱（`SEMGREP_BRANCH`） |
 
 最上層可設定 `snyk_severity`（預設 `high`）和 `trivy_severity`（預設 `CRITICAL,HIGH`）。這些門檻會記錄在報告的 `settings` 裡，因為「門檻以上沒有發現」和「完全沒有發現」是兩回事。

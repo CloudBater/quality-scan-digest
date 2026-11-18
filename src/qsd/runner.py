@@ -154,6 +154,8 @@ def validate(config, base):
             if not _SONAR_ALLOWED.match(key):
                 raise ConfigError(f"{name}: sonar_args entry {arg!r} is not an allowed analysis "
                                   f"property (no sonar.scanner.*, host, token, or executable overrides)")
+    if not isinstance(config.get("semgrep_partial_is_gap", False), bool):
+        raise ConfigError("semgrep_partial_is_gap must be true or false")
     mode = config.get("semgrep_mode", "auto")
     if mode not in SEMGREP_MODES:
         raise ConfigError(f"semgrep_mode must be one of {', '.join(SEMGREP_MODES)}")
@@ -361,6 +363,7 @@ def scan(config, base, out_dir, version="", tools=TOOLS):
                 "trivy_severity": config.get("trivy_severity", "CRITICAL,HIGH"),
                 "semgrep": _semgrep_label(config.get("semgrep_mode", "auto")),
                 "semgrep_mode": config.get("semgrep_mode", "auto"),
+                "semgrep_partial_is_gap": bool(config.get("semgrep_partial_is_gap", False)),
                 "tools": ",".join(tools),
                 # Digests actually referenced this run — pin ≠ what ran if PATH wins.
                 "images": {
@@ -377,7 +380,8 @@ def scan(config, base, out_dir, version="", tools=TOOLS):
         sha, dirty = git_sha(path)
         projects.append({"cfg": p, "path": path, "name": p["name"], "out": {
             "name": p["name"], "label": p.get("label") or p["name"],
-            "repo": p.get("repo", ""), "commit": sha, "commit_dirty": dirty, "notes": {}}})
+            "repo": p.get("repo", ""), "commit": sha, "commit_dirty": dirty, "notes": {},
+            "semgrep_partial_is_gap": bool(config.get("semgrep_partial_is_gap", False))}})
 
     shim = _python_shim() if "snyk" in tools else None
     sonar = None

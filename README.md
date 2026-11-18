@@ -97,6 +97,7 @@ the config file and may not point outside the project. See
 | `coverage` | Coverage file: relative path inside the checkout, or an absolute path to a CI artifact (parsed only) |
 | `sonar_args` | Extra `-Dsonar.<allowed>=…` analysis properties (sources, exclusions, language settings, `sourceEncoding`, `projectName` — no scanner/host/token/executable overrides) |
 | `semgrep_mode` | `auto` (default), `ci` (require token, never fall back to public rules), or `public` |
+| `semgrep_partial_is_gap` | `true` makes files Semgrep could only partly parse a gap (`incomplete`); default `false`: a note, source stays complete. A hard Semgrep error is always incomplete |
 | `semgrep_branch` | Per project: the branch name `semgrep ci` files the run under (`SEMGREP_BRANCH`) |
 
 Top level: `snyk_severity` (default `high`) and `trivy_severity` (default

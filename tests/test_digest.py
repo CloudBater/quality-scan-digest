@@ -81,9 +81,33 @@ class Parsers(unittest.TestCase):
         self.assertTrue(st["ok"])
         self.assertIn("incomplete", st["note"])
         self.assertFalse(semgrep.load(tmpjson({"error": "x"}), "A")[1]["ok"])
-        _, st = semgrep.load(tmpjson({"results": [], "errors": [{"level": "warn"}]}), "A")
+        # Partly parsed files: a note, and the source stays complete, unless asked otherwise.
+        warn = tmpjson({"results": [], "errors": [{"level": "warn"}]})
+        _, st = semgrep.load(warn, "A")
+        self.assertEqual((st["complete"], st["note"]), (True, "1 file(s) only partly parsed"))
+        _, st = semgrep.load(warn, "A", partial_is_gap=True)
         self.assertEqual((st["complete"], st["note"]),
                          (False, "incomplete: 1 file(s) only partly parsed"))
+        # A hard error is a gap either way.
+        hard = tmpjson({"results": [], "errors": [{"level": "error"}, {"level": "warn"}]})
+        for gap in (False, True):
+            self.assertFalse(semgrep.load(hard, "A", partial_is_gap=gap)[1]["complete"])
+
+    def test_semgrep_partial_parse_setting_reaches_the_report_and_the_manifest(self):
+        from qsd import runner
+        f = tmpjson({"results": [], "errors": [{"level": "warn"}]})
+        for flag in (False, True):
+            src = build_payload({"projects": [{"name": "a", "semgrep": f,
+                                               "semgrep_partial_is_gap": flag}]})["sources"]["a: Semgrep"]
+            self.assertEqual(src["complete"], not flag)
+        with tempfile.TemporaryDirectory() as d:
+            m, _ = runner.scan({"projects": [{"name": "a", "path": "."}],
+                                "semgrep_partial_is_gap": True}, d, os.path.join(d, "o"), tools=())
+            self.assertIs(m["projects"][0]["semgrep_partial_is_gap"], True)
+            self.assertIs(m["settings"]["semgrep_partial_is_gap"], True)
+            with self.assertRaises(runner.ConfigError):
+                runner.validate({"projects": [{"name": "a", "path": "."}],
+                                 "semgrep_partial_is_gap": "yes"}, d)
 
     def test_semgrep_supply_chain_counts_as_security(self):
         rows, _ = semgrep.load(fx("semgrep.json"), "API")

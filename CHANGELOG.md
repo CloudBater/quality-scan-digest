@@ -12,7 +12,10 @@ All notable changes to this project are documented here. The format follows
   Gitleaks now keeps `StartColumn` so same-line secrets stay distinct too.
 - HTML "Security crit + high" turns green only when every *required* source is complete;
   a zero under a gap is no longer painted as clean. Incomplete runs get a banner.
-- Semgrep "file only partly parsed" (`warn`) marks the source incomplete.
+- Semgrep files it could only partly parse (`warn`) are a note and the source stays complete
+  by default (they are the normal state of a real repo: 91 and 19 on a Django and a Next.js
+  repository, which would make every strict run exit 2); `semgrep_partial_is_gap: true` makes
+  them a gap. A hard Semgrep error is always incomplete.
 - `sonar_args` is an allowlist of analysis properties — `sonar.scanner.javaExePath` and
   other executable / host / token overrides are rejected.
 - `track` is unique within a report. It is location and identity without the message, so it
