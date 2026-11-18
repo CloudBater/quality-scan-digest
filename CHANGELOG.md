@@ -39,6 +39,7 @@ All notable changes to this project are documented here. The format follows
   `sonar.scm.provider` are no longer accepted in `sonar_args`, and an analysis of zero
   lines of code (a bogus `sonar.sources`, an exclusion like `**`) is *incomplete*, not clean.
 - `--strict` together with `--lenient` is an error instead of silently lenient.
+- `sonar_args` also accepts `sonar.sourceEncoding` and `sonar.projectName` (harmless metadata a real project needs).
 - `commit_dirty` is `null` when git status is unknown, and when a manifest omits it
   (it used to default to `false`, "clean").
 - GuardDog always appears in `sources` (skipped / not configured), even with no manifests;

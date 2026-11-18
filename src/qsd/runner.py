@@ -65,7 +65,7 @@ class ConfigError(ValueError):
 _SONAR_ARG = re.compile(r"^-Dsonar\.[A-Za-z0-9_.]+=.+$")
 _SONAR_ALLOWED = re.compile(
     r"^sonar\.("
-    r"sources|tests|exclusions|inclusions|"
+    r"sources|tests|exclusions|inclusions|sourceEncoding|projectName|"
     r"test\.(exclusions|inclusions)|"
     r"coverage\.exclusions|cpd\.exclusions|"
     r"scm\.exclusions|"

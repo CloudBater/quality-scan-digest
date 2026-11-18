@@ -688,8 +688,9 @@ class ReviewFixes(unittest.TestCase):
                         "-Dsonar.scanner.javaExePath=/tmp/x"):
                 with self.assertRaises(ConfigError, msg=bad):
                     validate({"projects": [{"name": "a", "path": ".", "sonar_args": [bad]}]}, d)
-            validate({"projects": [{"name": "a", "path": ".",
-                                    "sonar_args": ["-Dsonar.scm.exclusions=**/gen/**"]}]}, d)
+            validate({"projects": [{"name": "a", "path": ".", "sonar_args": [
+                "-Dsonar.scm.exclusions=**/gen/**", "-Dsonar.sourceEncoding=UTF-8",
+                "-Dsonar.projectName=My App"]}]}, d)
 
     def test_scanner_pins_the_host_on_the_command_line(self):
         from qsd import runner

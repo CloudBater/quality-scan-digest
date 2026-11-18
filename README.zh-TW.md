@@ -78,7 +78,7 @@ qsd scan examples/qsd.example.json --release v1.4.0 --out-dir qsd-out
 | `gitleaks_log_opts` | 限縮掃描的歷史範圍，例如 `origin/main..HEAD` |
 | `guarddog` | 清單，例如 `{"ecosystem": "pypi" \| "npm" \| "go" \| "github_action", "manifest": "requirements.txt"}` |
 | `coverage` | 覆蓋率檔案：checkout 內相對路徑，或 CI artifact 的絕對路徑（只解析） |
-| `sonar_args` | 額外的 `-Dsonar.<允許的鍵>=…` 分析參數（僅 sources／exclusions／語言設定；不可覆寫 scanner／host／token／可執行檔） |
+| `sonar_args` | 額外的 `-Dsonar.<允許的鍵>=…` 分析參數（sources、exclusions、語言設定、`sourceEncoding`、`projectName`；不可覆寫 scanner／host／token／可執行檔） |
 | `semgrep_mode` | `auto`（預設）、`ci`（必須有 token，絕不退回公開規則）、或 `public` |
 | `semgrep_branch` | 每個專案：`semgrep ci` 把這次掃描歸到哪個分支名稱（`SEMGREP_BRANCH`） |
 

@@ -95,7 +95,7 @@ the config file and may not point outside the project. See
 | `gitleaks_log_opts` | Limit the history, e.g. `origin/main..HEAD` |
 | `guarddog` | List of `{"ecosystem": "pypi" \| "npm" \| "go" \| "github_action", "manifest": "requirements.txt"}` |
 | `coverage` | Coverage file: relative path inside the checkout, or an absolute path to a CI artifact (parsed only) |
-| `sonar_args` | Extra `-Dsonar.<allowed>=…` analysis properties (sources/exclusions/language settings only — no scanner/host/token/executable overrides) |
+| `sonar_args` | Extra `-Dsonar.<allowed>=…` analysis properties (sources, exclusions, language settings, `sourceEncoding`, `projectName` — no scanner/host/token/executable overrides) |
 | `semgrep_mode` | `auto` (default), `ci` (require token, never fall back to public rules), or `public` |
 | `semgrep_branch` | Per project: the branch name `semgrep ci` files the run under (`SEMGREP_BRANCH`) |
 
