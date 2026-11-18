@@ -334,8 +334,10 @@ class Sonar:
                # checkout that moved it to /usr/src could make the JVM (which holds
                # SONAR_TOKEN) run checkout-supplied code. Pinned here: the command line wins.
                "-Dsonar.userHome=/tmp/.sonar",
-               # Force the image's `node` on PATH — never a checkout-supplied binary.
-               "-Dsonar.nodejs.executable=node"]
+               # The image's own node, never a checkout-supplied binary. This property takes a
+               # PATH: the bare command name `node` is read as a file name and the JavaScript /
+               # TypeScript analysis fails with "Node.js executable file does not exist".
+               "-Dsonar.nodejs.executable=/usr/bin/node"]
         cmd.extend(extra)
         if not os.path.exists(os.path.join(path, "sonar-project.properties")) \
                 and not any(str(a).startswith("-Dsonar.sources=") for a in extra):
@@ -850,6 +852,43 @@ def _guarddog(g, path, out, logfile, notes, source):
         _rm(out)
 
 
+def _git_mounts(path):
+    """`-v` arguments that make git work in a container for a worktree or a submodule.
+
+    In those checkouts `.git` is a FILE (`gitdir: <path>`) pointing outside the folder:
+    an absolute path for a worktree, a relative one for a submodule. Mounting only the
+    checkout leaves git inside the container with "not a git repository". The git
+    directory (and the common one a worktree shares) is mounted read-only at the path
+    the `.git` file expects. A plain repository (`.git` is a directory) needs nothing.
+    """
+    dotgit = os.path.join(path, ".git")
+    if not os.path.isfile(dotgit):
+        return []
+    with open(dotgit, encoding="utf-8", errors="replace") as fh:
+        m = re.search(r"^gitdir:\s*(.+?)\s*$", fh.read(), re.MULTILINE)
+    if not m:
+        return []
+    raw = m.group(1)
+    host = raw if os.path.isabs(raw) else os.path.normpath(os.path.join(path, raw))
+    inside = raw if os.path.isabs(raw) else os.path.normpath(os.path.join("/repo", raw))
+    mounts = [(host, inside)]
+    try:
+        with open(os.path.join(host, "commondir"), encoding="utf-8") as fh:
+            common = fh.read().strip()
+        mounts.append((common if os.path.isabs(common) else os.path.normpath(os.path.join(host, common)),
+                       common if os.path.isabs(common) else os.path.normpath(os.path.join(inside, common))))
+    except OSError:
+        pass
+    args = []
+    for h, c in mounts:
+        # A git directory nested in another mounted one (a worktree inside its common dir)
+        # is already visible there.
+        if os.path.isdir(h) and not any(h != o and h.startswith(o + os.sep) and c.startswith(oc + os.sep)
+                                        for o, oc in mounts):
+            args += ["-v", f"{h}:{c}:ro"]
+    return args
+
+
 def _gitleaks(cfg, path, out, logfile, notes, settings=None):
     """Full git history when the checkout is a repository, the files otherwise.
 
@@ -874,8 +913,8 @@ def _gitleaks(cfg, path, out, logfile, notes, settings=None):
         # The report goes to stdout so the container never writes to the host.
         cmd = ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
                "-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=safe.directory",
-               "-e", "GIT_CONFIG_VALUE_0=*", "-v", f"{path}:/repo:ro", GITLEAKS_IMAGE,
-               mode, "/repo", "--report-path", "/dev/stdout", *args]
+               "-e", "GIT_CONFIG_VALUE_0=*", "-v", f"{path}:/repo:ro", *_git_mounts(path),
+               GITLEAKS_IMAGE, mode, "/repo", "--report-path", "/dev/stdout", *args]
         target, runner = out, "container"
         log(f"Gitleaks: {mode} (container)")
     else:

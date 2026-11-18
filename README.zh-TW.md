@@ -38,7 +38,7 @@
 ## 安裝
 
 ```bash
-pip install git+https://github.com/CloudBater/quality-scan-digest@v0.4.0
+pip install git+https://github.com/CloudBater/quality-scan-digest@v0.4.1
 qsd --version
 ```
 

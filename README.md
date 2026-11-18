@@ -51,7 +51,7 @@ use `--lenient` only for local exploration. Tools left out of `--tools` still ap
 ## Install
 
 ```bash
-pip install git+https://github.com/CloudBater/quality-scan-digest@v0.4.0
+pip install git+https://github.com/CloudBater/quality-scan-digest@v0.4.1
 qsd --version
 ```
 
