@@ -160,7 +160,7 @@ over-counts.
 | Pass | Default | Merges rows that share |
 |---|---|---|
 | `exact` | on | project, source, kind, rule, location, line, **column** and message |
-| `advisory` | on | project, package (ecosystem-aware name rules), and a CVE/GHSA id, from **different** scanners. A row with no package joins only when every id it carries points to one package group |
+| `advisory` | on | project, package (ecosystem-aware name rules), and a CVE/GHSA id, from **different** scanners. A row with no package joins only when every id it carries points to one package group. A malware or malicious-package report never merges with an ordinary advisory |
 | `sast` | **off** | project, file, line and CWE, reported by **different** scanners; each row joins at most one group, so nothing chains |
 
 **Known limitation of `advisory`:** it matches on package and advisory, not on the installed

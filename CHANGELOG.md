@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] - 2026-11-18
+
+### Fixed
+- **A malicious-package report could be merged into an ordinary vulnerability row and lose its
+  malware count.** OSV-Scanner files a malicious package under `MAL-…` and copies CVE/GHSA aliases
+  into `ids`; the `advisory` pass then merged it under a Snyk or Semgrep dependency row of the same
+  package, because those scanners rank higher. The merged row had kind `Dependency`, so `malware`
+  and the malware tile did not count it, and the malicious sighting was only visible under `also`.
+  Malware and malicious-package rows now never merge with a non-malware row (two scanners that both
+  say malicious still merge). Reports with such a package now show one more row, counted as malware.
+  Found by an independent review of 0.5.0; present since 0.3.0.
+
 ## [0.5.0] - 2026-11-18
 
 ### Added

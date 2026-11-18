@@ -232,6 +232,49 @@ class Dedup(unittest.TestCase):
                 row(src="Trivy", ids=["GHSA-Y"], package="bbb")]
         self.assertEqual(len(dedup(rows)[0]), 3)
 
+    def test_a_malicious_package_report_is_never_merged_into_an_ordinary_advisory(self):
+        # OSV files a malicious package under MAL-… and copies CVE/GHSA aliases into `ids`. Merged
+        # under a Snyk dependency row it would be counted as one more vulnerable package.
+        dep = row(ids=["CVE-1"], package="evil", ecosystem="pypi")
+        mal = row(src="OSV-Scanner", kind="Malicious Package", ids=["CVE-1"], package="evil",
+                  ecosystem="pypi", ref="MAL-1")
+        rows, stats = dedup([dep, mal])
+        self.assertEqual((len(rows), stats["advisory"]), (2, 0))
+        self.assertEqual(sorted(r["kind"] for r in rows), ["Dependency", "Malicious Package"])
+        # Order must not matter, and a package-less row joining by id must obey it too.
+        rows, _ = dedup([mal, dep, row(src="Trivy", ids=["CVE-1"])])
+        self.assertEqual(sorted(r["kind"] for r in rows if "Malicious Package" in
+                                [r["kind"], *(a["kind"] for a in r["also"])]), ["Malicious Package"])
+        self.assertEqual(sum(1 for r in rows if r["kind"] == "Malicious Package"), 1)
+        self.assertTrue(all(a["kind"] != "Malicious Package" for r in rows for a in r["also"]))
+
+    def test_two_scanners_that_both_say_malicious_still_merge(self):
+        a = row(src="OSV-Scanner", kind="Malicious Package", ids=["GHSA-M"], package="evil", ref="MAL-1")
+        b = row(src="GuardDog", kind="Malicious Package", ids=["GHSA-M"], package="evil", ref="g")
+        rows, stats = dedup([a, b])
+        self.assertEqual((len(rows), stats["advisory"]), (1, 1))
+        self.assertEqual(rows[0]["kind"], "Malicious Package")
+
+    def test_a_merged_malware_group_does_not_later_absorb_an_ordinary_row(self):
+        a = row(src="OSV-Scanner", kind="Malicious Package", ids=["GHSA-M"], package="evil", ref="MAL-1")
+        b = row(src="GuardDog", kind="Malicious Package", ids=["GHSA-M"], package="evil", ref="g")
+        dep = row(src="Snyk", ids=["GHSA-M"], package="evil")
+        rows, _ = dedup([a, b, dep])
+        self.assertEqual(sorted(r["kind"] for r in rows), ["Dependency", "Malicious Package"])
+        mal = next(r for r in rows if r["kind"] == "Malicious Package")
+        self.assertEqual(sorted(mal["by"]), ["GuardDog", "OSV-Scanner"])
+
+    def test_malware_and_a_plain_dependency_never_chain_through_a_third_row(self):
+        mal = row(src="OSV-Scanner", kind="Malicious Package", ids=["CVE-1"], package="evil", ref="MAL-1")
+        dep = row(ids=["CVE-1"], package="evil")
+        bridge = row(src="Dependabot", ids=["CVE-1"], package="evil")
+        rows, _ = dedup([mal, dep, bridge])
+        kinds = sorted(r["kind"] for r in rows)
+        self.assertEqual(kinds.count("Malicious Package"), 1)
+        for r in rows:
+            if r["kind"] == "Malicious Package":
+                self.assertEqual(r["by"], ["OSV-Scanner"])
+
     def test_projects_never_merge(self):
         _, stats = dedup([row(ids=["CVE-1"], package="a"),
                           row(proj="B", src="Dependabot", ids=["CVE-1"], package="a")])
