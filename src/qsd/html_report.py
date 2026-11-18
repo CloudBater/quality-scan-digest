@@ -38,6 +38,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85em;col
 .tag{font-size:.72rem;padding:.1rem .4rem;border-radius:4px;background:var(--card);border:1px solid var(--line);white-space:nowrap;margin-right:.2rem}
 .empty{padding:2rem;text-align:center;color:var(--mut)}
 footer{margin-top:1.5rem;color:var(--mut);font-size:.78rem;border-top:1px solid var(--line);padding-top:.8rem}
+.waived{margin-top:1rem}.waived summary{cursor:pointer;font-weight:600}
 .banner{background:var(--warnbg);color:var(--warnfg);border-radius:8px;padding:.7rem .9rem;margin:0 0 1rem;font-size:.9rem}
 </style></head><body>
 <h1>__TITLE__</h1>
@@ -60,10 +61,17 @@ __BANNER__
 <th data-k="kind">Type</th><th data-k="msg">Finding</th><th data-k="loc">Location</th><th data-k="fix">Fix</th></tr></thead>
 <tbody id="rows"></tbody></table></div>
 <div class="empty" id="empty" hidden>No findings match this filter.</div>
+<details id="waived" class="waived" hidden><summary id="waived-sum"></summary>
+<p class="count">These findings were set aside by the waiver file. They are not counted above and
+are listed so nothing disappears silently. Each waiver expires.</p>
+<div class="wrap"><table><thead><tr><th>Severity</th><th>Project</th><th>Seen by</th><th>Finding</th>
+<th>Location</th><th>Why</th><th>Until</th><th>Ticket</th></tr></thead><tbody id="waived-rows"></tbody></table></div></details>
 <footer>Sources marked “not collected” were unavailable at build time; their absence is not a clean result.
 A row seen by several scanners is listed once; its other sightings are listed under it.</footer>
 <script>
-const DATA = __DATA__;
+const ALL = __DATA__;
+const ignored = r => r.waiver && r.waiver.status === "ignore";
+const DATA = ALL.filter(r => !ignored(r)), WAIVED = ALL.filter(ignored);
 const $ = i => document.getElementById(i);
 let sortKey = null, sortAsc = true;
 const facet = {proj:r=>[r.proj], src:r=>r.by, kind:r=>[r.kind], sev:r=>[r.sev]};
@@ -81,11 +89,19 @@ function render(){
     <td class="sev ${esc(r.sev)}">${esc(r.sev)}</td>
     <td><span class="tag">${esc(r.proj)}</span></td>
     <td>${r.by.map(s=>`<span class="tag">${esc(s)}</span>`).join("")}</td><td>${esc(r.kind)}</td>
-    <td>${esc(r.msg)}<br><code>${esc([r.ref,...(r.ids||[])].filter((v,i,a)=>v&&a.indexOf(v)===i).join(" · "))}</code>${(r.also||[]).length?`<details><summary>${r.also.length} more sighting(s)</summary>${r.also.map(a=>`<div><span class="tag">${esc(a.src)}</span> <span class="sev ${esc(a.sev)}">${esc(a.sev)}</span> ${esc(a.msg)} <code>${esc(a.ref)} ${esc(a.loc)}${a.line?":"+esc(a.line):""}</code></div>`).join("")}</details>`:""}</td>
+    <td>${esc(r.msg)}<br><code>${esc([r.ref,...(r.ids||[])].filter((v,i,a)=>v&&a.indexOf(v)===i).join(" · "))}</code>${r.waiver?`<br><span class="tag">Tracked: ${esc(r.waiver.ticket)}</span> <code>${esc(r.waiver.reason)} (until ${esc(r.waiver.until)})</code>`:""}${(r.also||[]).length?`<details><summary>${r.also.length} more sighting(s)</summary>${r.also.map(a=>`<div><span class="tag">${esc(a.src)}</span> <span class="sev ${esc(a.sev)}">${esc(a.sev)}</span> ${esc(a.msg)} <code>${esc(a.ref)} ${esc(a.loc)}${a.line?":"+esc(a.line):""}</code></div>`).join("")}</details>`:""}</td>
     <td><code>${esc(r.loc)}</code>${r.line?` <code>:${esc(r.line)}</code>`:""}</td>
     <td>${esc(r.fix)}</td></tr>`).join("");
   $("count").textContent=`${rows.length} of ${DATA.length} findings`;
   $("empty").hidden=rows.length>0;
+}
+if (WAIVED.length) {
+  $("waived").hidden = false;
+  $("waived-sum").textContent = `Waived (${WAIVED.length})`;
+  $("waived-rows").innerHTML = WAIVED.map(r=>`<tr><td class="sev ${esc(r.sev)}">${esc(r.sev)}</td>
+    <td><span class="tag">${esc(r.proj)}</span></td><td>${r.by.map(s=>`<span class="tag">${esc(s)}</span>`).join("")}</td>
+    <td>${esc(r.msg)}<br><code>${esc(r.ref)}</code></td><td><code>${esc(r.loc)}${r.line?":"+esc(r.line):""}</code></td>
+    <td>${esc(r.waiver.reason)}</td><td>${esc(r.waiver.until)}</td><td>${esc(r.waiver.ticket)}</td></tr>`).join("");
 }
 document.querySelectorAll("th").forEach(th=>th.onclick=()=>{const k=th.dataset.k;sortAsc=sortKey===k?!sortAsc:true;sortKey=k;render();});
 ["q","proj","src","kind","sev"].forEach(i=>$(i).addEventListener("input",render));
@@ -159,10 +175,18 @@ def render(payload):
         _tile("Security unrated", unrated, "bad" if unrated else ""),
         _tile("Malware / malicious pkgs", malware, "bad" if malware else ""),
         _tile("Dependabot advisories", dbot, "bad" if dbot else ""),
-        _tile("Suppressed (waived)", suppressed),
+        _tile("Suppressed in the tools", suppressed),
         _tile("Security hotspots", sonar("security_hotspots")),
         _tile("Duplicates merged", stats.get("input", 0) - stats.get("output", 0)),
     ])
+    wb = payload.get("waivers")
+    if wb:
+        untracked = sum(s.get("untracked_crit_high") or 0 for s in summaries)
+        sec += "".join([
+            _tile("Untracked crit + high", untracked, "bad" if untracked else clean_ok),
+            _tile("Tracked (have a ticket)", sum(s.get("tracked") or 0 for s in summaries)),
+            _tile("Ignored by waiver file", sum(s.get("waived") or 0 for s in summaries)),
+        ])
     qual = "".join([
         _tile("Bugs", sonar("bugs")),
         _tile("Code smells", sonar("code_smells")),
@@ -226,6 +250,10 @@ def render(payload):
                        f'scan some files ({details}). The rest was scanned, but a missing finding '
                        f'in those files is weaker evidence than elsewhere, so a low or zero count '
                        f'is not a full-scan result.</div>')
+    if wb and wb.get("errors"):
+        listed = "; ".join(html.escape(e) for e in wb["errors"])
+        banners.append(f'<div class="banner">⚠ <b>Waiver problem</b> — {listed}. The findings those '
+                       f'waivers would have set aside are counted.</div>')
     banner = "".join(banners)
     parts = {
         "TITLE": html.escape(payload["title"]),

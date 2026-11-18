@@ -1,0 +1,17 @@
+# qsd waiver file. Pass it explicitly: `--ignore-file path` or `"ignore_file": "path"` in the config.
+# It is never read from a scanned checkout. One waiver per line; # starts a comment.
+#
+#   ignore  a false positive or an accepted risk: listed under "Waived", left out of the counts
+#   track   a real finding that already has a ticket: still counted, labelled with the ticket
+#
+# Required on every line: reason=... until=YYYY-MM-DD (at most 12 months ahead).
+# Matchers (at least one of src, ref, loc, track): src, ref and loc take * wildcards;
+# project narrows a line; track=<id> picks one finding. No line numbers: they drift.
+# HIGH and above need ticket=. A secret or malware finding can only be waived by track=.
+# expect=N makes the line fail if it ever matches more than N findings.
+
+# The scanner matches the word "Update" in audit-log sentences; none of it is SQL.
+ignore src=Semgrep ref="python.django.security.injection.tainted-sql-string.*" loc="app/audit/*" expect=16 until=2027-05-01 reason="audit-log text, not SQL"
+
+# A real finding with a ticket: counted, and shown as tracked.
+track ref=GHSA-xxxx-xxxx-xxxx loc="*: example-package@1.2.3" ticket=PROJ-123 until=2027-02-01 reason="upgrade scheduled for the next release"

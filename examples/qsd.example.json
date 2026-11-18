@@ -1,5 +1,6 @@
 {
   "title": "Example App \u2014 Quality & Security",
+  "ignore_file": "../scan-config/qsdignore",
   "snyk_severity": "high",
   "trivy_severity": "CRITICAL,HIGH",
   "projects": [

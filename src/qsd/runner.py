@@ -248,6 +248,19 @@ def validate(config, base):
             if key not in _SONAR_ALLOWED:
                 raise ConfigError(f"{name}: sonar_args entry {arg!r} is not an allowed analysis "
                                   f"property (exact allowlist only; no wildcards or executables)")
+    ignore = config.get("ignore_file")
+    if ignore is not None:
+        if not isinstance(ignore, str) or not ignore:
+            raise ConfigError("ignore_file must be a path")
+        where = os.path.realpath(os.path.join(base, ignore))
+        if not os.path.isfile(where):
+            raise ConfigError(f"ignore_file {ignore!r} is not a file")
+        for p in projects:
+            root = os.path.realpath(os.path.join(base, p["path"]))
+            if os.path.commonpath([where, root]) == root:
+                raise ConfigError(f"ignore_file is inside the scanned checkout of {p['name']!r}; "
+                                  f"a change to that code could then waive its own findings. "
+                                  f"Keep it in the repository that owns the scan configuration.")
     partial = config.get("semgrep_partial_is_gap", False)
     if not isinstance(partial, bool):
         raise ConfigError("semgrep_partial_is_gap must be true or false")
@@ -545,6 +558,8 @@ def scan(config, base, out_dir, version="", tools=TOOLS):
 
     manifest = {"title": config.get("title", ""), "version": version, "settings": settings,
                 "projects": [pr["out"] for pr in projects]}
+    if config.get("ignore_file"):
+        manifest["ignore_file"] = os.path.realpath(os.path.join(base, config["ignore_file"]))
     return manifest, run_dir
 
 

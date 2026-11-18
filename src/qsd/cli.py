@@ -10,6 +10,7 @@ from .dedup import ALL_PASSES, DEFAULT_PASSES
 from .html_report import render
 from .report import ManifestError, build_payload
 from .runner import TOOLS, ConfigError, scan
+from .waivers import WaiverError
 
 
 def _write(payload, json_out, html_out):
@@ -34,6 +35,16 @@ def _write(payload, json_out, html_out):
             print(f"  {state}: {name} - {v['note']}", file=sys.stderr)
         elif v.get("note"):
             print(f"  note: {name} - {v['note']}", file=sys.stderr)
+    w = payload.get("waivers")
+    if w:
+        ignored = sum(s.get("waived", 0) for s in payload["generated_from"])
+        tracked = sum(s.get("tracked", 0) for s in payload["generated_from"])
+        print(f"waivers ({w['file']}, sha256 {w['sha256'][:12]}): {ignored} ignored, {tracked} tracked",
+              file=sys.stderr)
+        for e in w["errors"]:
+            print(f"  waiver error: {e}", file=sys.stderr)
+        for line in w["stale"]:
+            print(f"  waiver note: line {line} matched no finding; remove it or fix it", file=sys.stderr)
     partial = [(n, v) for n, v in src.items() if v.get("partial") and v["collected"]]
     if partial:
         # The source counts as complete (strict passes), but this is NOT a full scan of
@@ -63,6 +74,8 @@ def _common(p):
     # than a failing exit. --lenient is for local exploration of partial runs.
     p.add_argument("--strict", action=argparse.BooleanOptionalAction, default=None,
                    help="exit 2 unless every required source was collected completely (default)")
+    p.add_argument("--ignore-file", default=None,
+                   help="waiver file (.qsdignore); never read from a scanned checkout")
     p.add_argument("--lenient", action="store_true",
                    help="alias for --no-strict: allow incomplete sources")
 
@@ -108,6 +121,8 @@ def main(argv=None):
             manifest, run_dir = scan(config, os.path.dirname(os.path.abspath(a.config)),
                                      os.path.abspath(a.out_dir), a.release, tools)
             manifest["settings"]["dedup"] = ",".join(a.dedup) or "none"
+            if a.ignore_file:
+                manifest["ignore_file"] = os.path.abspath(a.ignore_file)
             with open(os.path.join(run_dir, "manifest.json"), "w", encoding="utf-8") as fh:
                 json.dump(manifest, fh, indent=1)
             payload = build_payload(manifest, "", a.dedup)
@@ -122,10 +137,12 @@ def main(argv=None):
             _resolve(manifest, os.path.dirname(os.path.abspath(a.manifest)))
             if a.release is not None:
                 manifest["version"] = a.release
+            if a.ignore_file:
+                manifest["ignore_file"] = os.path.abspath(a.ignore_file)
             manifest.setdefault("settings", {})["dedup"] = ",".join(a.dedup) or "none"
             payload = build_payload(manifest, token, a.dedup)
             counts = _write(payload, a.json_out, a.html_out)
-    except (ManifestError, ConfigError) as exc:
+    except (ManifestError, ConfigError, WaiverError) as exc:
         sys.exit(f"error: {exc}")
 
     collected, complete, total = counts
@@ -141,12 +158,20 @@ def main(argv=None):
             for n, v in gaps:
                 print(f"  {n} - {v['note']}", file=sys.stderr)
             sys.exit(2)
+        errors = (payload.get("waivers") or {}).get("errors") or []
+        if errors:
+            # An expired waiver or an over-broad one means the counts would understate.
+            print(f"error: --strict: {len(errors)} waiver problem(s); the findings they would "
+                  f"have hidden are counted", file=sys.stderr)
+            sys.exit(2)
 
 
 def _resolve(manifest, base):
     def fix(p):
         return p if not p or not isinstance(p, str) or os.path.isabs(p) \
             else os.path.normpath(os.path.join(base, p))
+    if isinstance(manifest, dict) and manifest.get("ignore_file"):
+        manifest["ignore_file"] = fix(manifest["ignore_file"])
     for p in manifest.get("projects", []):
         if not isinstance(p, dict):
             continue

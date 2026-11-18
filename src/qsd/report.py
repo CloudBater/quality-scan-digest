@@ -9,6 +9,7 @@ import hashlib
 import os
 
 from . import __version__
+from . import waivers as _waivers
 from .dedup import DEFAULT_PASSES, dedup
 from .model import fingerprint, is_malware, is_security, rank, safe_name, track_key
 from .parsers import clamav as p_clamav
@@ -25,7 +26,7 @@ from .parsers import zizmor as p_zizmor
 
 # Bump when the payload shape or enum set changes. Consumers pin on this, not the
 # package version: v0.3.0 already grew under schema 1.0 without a signal.
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 
 
 # Keys of a project in a manifest that name a source. A project with none, or a misspelled
@@ -262,9 +263,15 @@ def _assign_tracks(rows):
         r.pop("_track", None)
 
 
-def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES):
-    """Manifest dict -> payload dict."""
+def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES, today=None):
+    """Manifest dict -> payload dict. `today` is for tests; it decides waiver expiry."""
     manifest = validate(manifest)
+    today = today or _dt.datetime.now(_dt.timezone.utc).date()
+    waiver_list, waiver_sha = [], None
+    ignore_file = manifest.get("ignore_file")
+    if ignore_file:
+        # Parsed before any scanner output is read, so a bad file fails fast.
+        waiver_list, waiver_sha = _waivers.load(ignore_file, today)
     raw, summaries, sources = [], [], {}
     for cfg in manifest["projects"]:
         r, s, src = collect_project(cfg, sonar_token)
@@ -293,8 +300,18 @@ def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES):
     rows.sort(key=lambda r: (r["rank"], r["proj"], r["src"], r["loc"], str(r["line"]),
                              str(r.get("col", ""))))
 
+    waiver_block = None
+    if ignore_file:
+        errors, waiver_block = _waivers.apply(rows, waiver_list, today)
+        waiver_block.update({"file": os.path.basename(ignore_file), "sha256": waiver_sha})
+    else:
+        for r in rows:
+            r["waiver"] = None
+
     for s in summaries:
-        mine = [r for r in rows if r["project_id"] == s["project_id"]]
+        everything = [r for r in rows if r["project_id"] == s["project_id"]]
+        # An `ignore` row stays in `findings` but is not counted; a `track` row is counted.
+        mine = [r for r in everything if not (r["waiver"] and r["waiver"]["status"] == "ignore")]
         sec = [r for r in mine if is_security(r)]
         by_source = {}
         for r in mine:
@@ -307,6 +324,10 @@ def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES):
             # Unrated security (sev "—", rank 5) is invisible from the crit/high gate.
             "sec_unrated": sum(1 for r in sec if r["rank"] >= 5),
             "malware": sum(1 for r in mine if is_malware(r)),
+            "waived": len(everything) - len(mine),
+            "tracked": sum(1 for r in mine if r["waiver"]),
+            # Security HIGH or above that has neither a waiver nor a ticket.
+            "untracked_crit_high": sum(1 for r in sec if r["rank"] <= 1 and not r["waiver"]),
             # Sightings per scanner: a merged row counts under each, so these do not sum.
             "by_source": by_source,
             # Kept for consumers of the original payload shape.
@@ -329,5 +350,6 @@ def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES):
         "generated_from": summaries,
         "sources": sources,
         "dedup": stats,
+        "waivers": waiver_block,
         "findings": rows,
     }

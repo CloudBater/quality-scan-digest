@@ -123,29 +123,59 @@ Dependabot 以 `open,dismissed,auto_dismissed` 抓取：被 dismiss 的警示計
 
 合併後保留資訊最完整的那筆，嚴重度取整組中**最嚴重**的，其他工具的回報（訊息、嚴重度、規則、位置、修正建議）完整放在 `also` 底下。`by` 列出所有看到它的工具。不同專案之間絕不合併；Snyk IaC 和 Trivy 的規則編號彼此無關，所以設定錯誤類的問題不會合併。可用 `--dedup exact,advisory,sast` 選擇規則，或用 `--dedup none` 關閉。解析器本身會保留每個受影響的版本與 manifest。
 
+## 豁免檔（`.qsdignore`）
+
+大型掃描的結果多半不需要處理：把稽核紀錄的句子誤判成 SQL 的規則、加固建議、已經開了工單的漏洞。豁免檔可以把它們「放到一邊」，但不會藏起來。請明確指定檔案（`--ignore-file 路徑`，或設定檔的 `"ignore_file"`），範例見 [`examples/qsdignore.example`](examples/qsdignore.example)。
+
+```
+ignore src=Semgrep ref="python.django.security.injection.tainted-sql-string.*" loc="app/audit/*" expect=16 until=2027-05-01 reason="稽核紀錄文字，不是 SQL"
+track  ref=GHSA-xxxx-xxxx-xxxx loc="*: example-package@1.2.3" ticket=PROJ-123 until=2027-02-01 reason="已排入下一版升級"
+```
+
+| 動詞 | 意思 | 是否計入頭條數字 |
+|---|---|---|
+| `ignore` | 誤判，或已接受的風險 | 否，列在「Waived」區 |
+| `track` | 真的問題，但已有工單 | 是，並標上工單號 |
+
+報告多了一個最重要的數字 `untracked_crit_high`：沒有豁免也沒有工單的 CRITICAL／HIGH 資安問題。
+
+- **被豁免的問題不會消失。** 它仍在 `findings` 裡，附上 `waiver`（`status`、`reason`、`ticket`、`until`、`line`）。
+- **每一行都要有 `reason` 與 `until` 日期**，最多 12 個月後。過期後問題重新計入，strict 模式會以 exit 2 失敗。
+- **HIGH 以上需要 `ticket`**，所有 `track` 也一樣。
+- **`expect=N`**：這一行若匹配超過 N 筆，就一筆也不豁免，strict 模式以 exit 2 失敗，避免「忽略這條規則」日後悄悄蓋住新的真問題。
+- **機密與惡意程式**只能逐筆用 `track=<該問題的 track>` 豁免，不能用規則樣式。`src=` 只有在沒有其他掃描器也看到同一列時才會豁免它。
+- **過時的行**（沒匹配到任何東西）列在 `waivers.stale`；檔案的 SHA-256 會記錄在報告裡。
+- 比對條件：`src`、`ref`（規則或通報編號）、`loc`（路徑或 `package@version`，可用 `*`）、`project`、以及精確的 `track`。不用行號，因為行號會漂移。
+- **檔案絕不會從被掃描的 checkout 讀取**，`ignore_file` 放在 checkout 內會被拒絕；否則 pull request 可以替自己的問題開豁免。請放在擁有掃描設定、由資安負責人審核的 repo。
+
+它不取代各工具自己的抑制功能（那些計入 `sources.*.suppressed`）。
+
 ## 輸出格式
 
 [`schema/report.schema.json`](schema/report.schema.json) 定義了輸出內容：
 
 ```jsonc
 {
-  "schema_version": "1.1",
-  "generator": { "name": "quality-scan-digest", "version": "0.4.0" },
+  "schema_version": "1.2",
+  "generator": { "name": "quality-scan-digest", "version": "0.5.0" },
   "title": "…", "version": "v1.4.0", "generated_at": "…",
   "settings": { "snyk_severity": "high", "trivy_severity": "CRITICAL,HIGH", "dedup": "exact,advisory",
                 "tools": "…", "images": {…}, "runners": { "clamav": "container" } },
   "generated_from": [ { "project_id": "api", "project": "API", "repo": "…", "commit": "…",
                         "commit_dirty": false, "sonar": {…}, "coverage": {…}, "dependabot": {…},
                         "findings": 120, "security": 40, "sec_crit_high": 3, "sec_unrated": 1,
-                        "malware": 2, "by_source": {…} } ],
+                        "malware": 2, "waived": 5, "tracked": 1, "untracked_crit_high": 2,
+                        "by_source": {…} } ],
   "sources": { "API: Semgrep": { "collected": true, "complete": true,
                                  "note": "PARTIAL SCAN: 88 file(s) only partly parsed, so Semgrep did not fully scan them (the rest of the repository was scanned)", "suppressed": 0, "partial": 88, "optional": false } },
+  "waivers": { "file": ".qsdignore", "sha256": "…", "lines": […], "stale": [], "expired": [], "errors": [] },
   "dedup":   { "input": 180, "passes": ["exact", "advisory"], "exact": 4, "advisory": 56, "output": 120 },
   "findings": [ { "id": "…", "track": "…", "project_id": "api", "proj": "API", "src": "Snyk",
                   "by": ["Snyk", "Dependabot"], "kind": "Dependency", "security": true,
                   "sev": "HIGH", "rank": 1, "msg": "…", "loc": "poetry.lock: django@4.2.0",
                   "line": "", "col": "", "ref": "SNYK-…", "ids": ["CVE-…"], "cwe": ["CWE-89"],
-                  "fix": "upgrade to …", "also": [ { "src": "Dependabot", "sev": "MEDIUM", "msg": "…" } ] } ]
+                  "fix": "upgrade to …", "also": [ { "src": "Dependabot", "sev": "MEDIUM", "msg": "…" } ],
+                  "waiver": null } ]
 }
 ```
 

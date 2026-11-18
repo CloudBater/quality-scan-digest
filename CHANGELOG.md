@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-11-18
+
+### Added
+- **Waiver file (`.qsdignore`).** Mark findings as `ignore` (a false positive or an accepted
+  risk: listed under "Waived", left out of the headline counts) or `track` (a real finding that
+  already has a ticket: still counted, labelled with the ticket). A waived finding is never
+  removed from `findings`; it carries a `waiver` with the reason, expiry and ticket. Pass the file
+  with `--ignore-file` or `ignore_file` in the config. See `examples/qsdignore.example`.
+- New per-project counts `waived`, `tracked` and `untracked_crit_high` (security CRITICAL or HIGH
+  with neither a waiver nor a ticket), a top-level `waivers` block (per-line match counts, `stale`,
+  `expired`, `errors`, and the file's SHA-256), and a matching HTML section and tiles.
+- Guardrails: every line needs a `reason` and an `until` date at most 12 months ahead; HIGH and
+  above need a `ticket`; `track` needs one; `expect=N` stops a rule from silently covering new
+  findings; a secret or malware finding can only be waived by its exact `track` key; `src` does
+  not waive a row another scanner also saw. An expired line, or one over its `expect`, waives
+  nothing and fails a strict run (exit 2). A line that matches nothing is listed as stale.
+- `ignore_file` is refused when it lies inside a scanned checkout, and is never read from one, so a
+  pull request cannot waive its own finding.
+
+### Changed
+- Report schema 1.2: every finding has `waiver` (null when none), each project has `waived`,
+  `tracked` and `untracked_crit_high`, and the report has `waivers` (null without a file).
+  Consumers pinned to 1.1 should drop `ignore` rows themselves and keep `track` rows.
+- The HTML tile "Suppressed (waived)" is now "Suppressed in the tools", so it is not confused with
+  the waiver file.
+
 ## [0.4.1] - 2026-11-18
 
 ### Fixed
