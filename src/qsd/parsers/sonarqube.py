@@ -132,6 +132,15 @@ def to_rows(doc, label, project_id=None):
                 (doc.get("measures") or {}).get("component", {}).get("measures", [])}
     if not measures:
         notes.append("incomplete: no measures")
+    else:
+        try:
+            analysed = float(measures.get("ncloc") or 0)
+        except (TypeError, ValueError):
+            analysed = 0
+        # A bogus `sonar.sources` or an exclusion like `**` analyses nothing and would
+        # otherwise read as a clean project.
+        if analysed <= 0:
+            notes.append("incomplete: no lines of code analysed (check sonar.sources and exclusions)")
 
     rows = []
     for i in issues:

@@ -50,7 +50,7 @@ def _common(p):
                    help="comma list of passes: exact,advisory (default), sast (opt-in), or 'none'")
     # Strict is the default: a release console that screenshots zero under a gap is worse
     # than a failing exit. --lenient is for local exploration of partial runs.
-    p.add_argument("--strict", action=argparse.BooleanOptionalAction, default=True,
+    p.add_argument("--strict", action=argparse.BooleanOptionalAction, default=None,
                    help="exit 2 unless every required source was collected completely (default)")
     p.add_argument("--lenient", action="store_true",
                    help="alias for --no-strict: allow incomplete sources")
@@ -78,6 +78,12 @@ def main(argv=None):
     _common(d)
 
     a = ap.parse_args(argv)
+    if a.lenient and a.strict:
+        ap.error("--strict and --lenient contradict each other")
+    if a.lenient:
+        a.strict = False
+    elif a.strict is None:
+        a.strict = True
     token = os.environ.get("SONAR_TOKEN", "")
 
     try:
@@ -112,8 +118,6 @@ def main(argv=None):
         sys.exit(f"error: {exc}")
 
     collected, complete, total = counts
-    if getattr(a, "lenient", False):
-        a.strict = False
     if collected == 0:
         sys.exit("error: no sources collected - this report would be misleading")
     if a.strict:

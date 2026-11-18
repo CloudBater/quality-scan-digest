@@ -97,6 +97,7 @@ the config file and may not point outside the project. See
 | `coverage` | Coverage file: relative path inside the checkout, or an absolute path to a CI artifact (parsed only) |
 | `sonar_args` | Extra `-Dsonar.<allowed>=…` analysis properties (sources/exclusions/language settings only — no scanner/host/token/executable overrides) |
 | `semgrep_mode` | `auto` (default), `ci` (require token, never fall back to public rules), or `public` |
+| `semgrep_branch` | Per project: the branch name `semgrep ci` files the run under (`SEMGREP_BRANCH`) |
 
 Top level: `snyk_severity` (default `high`) and `trivy_severity` (default
 `CRITICAL,HIGH`). These floors are recorded in the report's `settings`, because zero
@@ -129,7 +130,17 @@ and a token is never read from the manifest itself. Use a user token: an analysi
 token cannot read hotspots, which is reported as incomplete.
 
 Exit codes: `1` when **no** source was collected or the input is invalid; **`2` by
-default** when any required source is incomplete (`--lenient` / `--no-strict` to allow).
+default** when any required source is incomplete (`--lenient` / `--no-strict` to allow;
+`--strict --lenient` together is an error).
+
+A source is **optional** only if the project's `skipped` list names it (`qsd scan` writes
+that list for tools left out of `--tools` and for GuardDog with no `guarddog` list). The
+wording of a note never makes a source optional. For a hand-written manifest, list what
+you deliberately did not run under `"skipped": ["Semgrep", ...]`; anything else that is
+missing fails the strict gate.
+
+Dependabot is fetched as `open,dismissed,auto_dismissed`: dismissed alerts count as
+`suppressed`. `fixed` alerts are not fetched, so `dependabot.fixed` is 0 from `qsd scan`.
 
 ## Deduplication
 
@@ -178,9 +189,13 @@ Parsers themselves keep every affected version and manifest.
 Severities are normalised onto one scale (`rank` 0 = CRITICAL/BLOCKER … 4 = INFO, 5 = unrated `—`).
 `security` is decided by what a finding is (dependency, container, IaC,
 misconfiguration, vulnerability, hotspot, secret, workflow, malware, package risk), not by which scanner
-reported it. Use **`track`** for trend / Backstage identity (stable without the message);
-**`id`** is the display hash and changes when advisory text rewrites. Waived findings
-are counted under `sources.*.suppressed`, not dropped silently.
+reported it. Use **`track`** for trend identity: it is unique within a report
+and does not include the message, so a scanner rewording a title does not change it. Rows
+whose location and rule collide (two secrets on one line) are told apart by a hash of the
+message, so for those rows `track` is best effort: it can change if a sibling disappears
+or a message is reworded. **`id`** is the display hash (it includes the message, and the
+column when the tool reports one). Waived findings are counted under
+`sources.*.suppressed`, not dropped silently.
 
 ## Security notes
 

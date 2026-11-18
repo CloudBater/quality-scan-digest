@@ -275,7 +275,7 @@
         },
         "track": {
           "type": "string",
-          "description": "Stable tracking key without message; use for trend / Backstage diffs"
+          "description": "Stable tracking key without message; use for trend diffs"
         },
         "proj": {
           "type": "string"

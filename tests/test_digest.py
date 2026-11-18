@@ -554,5 +554,219 @@ class Runner(unittest.TestCase):
             self.assertEqual(pkg, fh.read())
 
 
+class ReviewFixes(unittest.TestCase):
+    """Regressions for the independent review of PR #1; each fails if its fix is reverted."""
+
+    def payload(self, manifest, **kw):
+        return build_payload(manifest, **kw)
+
+    # -- optional is structural, never read from a note's wording
+    def test_a_skipped_note_alone_never_makes_a_failed_source_optional(self):
+        d = tempfile.mkdtemp()
+        base = {"name": "a", "semgrep": os.path.join(d, "missing.json"),
+                "notes": {"Semgrep": "skipped: semgrep crashed"}}
+        src = self.payload({"projects": [base]})["sources"]["a: Semgrep"]
+        self.assertEqual((src["collected"], src["optional"]), (False, False))
+        src = self.payload({"projects": [dict(base, skipped=["Semgrep"])]})["sources"]["a: Semgrep"]
+        self.assertTrue(src["optional"])
+
+    def test_strict_gate_fails_on_a_note_only_skip_and_passes_on_a_declared_skip(self):
+        d = tempfile.mkdtemp()
+        def run(manifest):
+            path = os.path.join(d, "m.json")
+            with open(path, "w") as fh:
+                json.dump(manifest, fh)
+            env = dict(os.environ, PYTHONPATH=os.path.join(HERE, "..", "src"))
+            return subprocess.run([sys.executable, "-m", "qsd", "digest", path, "--json-out",
+                                   os.path.join(d, "r.json")], env=env, capture_output=True, text=True)
+        ok = os.path.join(FIX, "semgrep.json")
+        base = {"name": "a", "semgrep": ok, "dependabot": os.path.join(d, "none.json"),
+                "notes": {"Dependabot": "skipped: token expired"}}
+        self.assertEqual(run({"projects": [base]}).returncode, 2)
+        self.assertEqual(run({"projects": [dict(base, skipped=["Dependabot"])]}).returncode, 0)
+
+    def test_runner_records_skips_structurally_and_lists_guarddog_even_when_unconfigured(self):
+        from qsd import runner
+        with tempfile.TemporaryDirectory() as d:
+            m, _ = runner.scan({"projects": [{"name": "a", "path": "."}]}, d, os.path.join(d, "o"),
+                               tools=("guarddog",))
+            proj = m["projects"][0]
+            self.assertIn("Semgrep", proj["skipped"])
+            self.assertIn("GuardDog (not configured)", proj["skipped"])
+            src = build_payload(m)["sources"]
+            self.assertIn("a: GuardDog (not configured)", src)
+            self.assertTrue(src["a: GuardDog (not configured)"]["optional"])
+            self.assertTrue(src["a: Semgrep"]["optional"])
+            self.assertFalse(src["a: Semgrep"]["collected"])
+
+    # -- ids and tracks
+    def test_id_of_a_row_without_a_column_is_unchanged_since_v030(self):
+        import hashlib
+        from qsd.model import fingerprint
+        r = row(ref="r", loc="f.py", line=3, msg="m")
+        old = hashlib.sha256("\x1f".join(
+            [r["project_id"], "Snyk", "Dependency", "r", "f.py", "3", "m"]).encode()).hexdigest()[:16]
+        self.assertEqual(fingerprint(r), old)
+        self.assertNotEqual(fingerprint(row(ref="r", loc="f.py", line=3, msg="m", col=9)), old)
+        self.assertNotEqual(fingerprint(row(ref="r", loc="f.py", line=3, msg="m", col=9)),
+                            fingerprint(row(ref="r", loc="f.py", line=3, msg="m", col=10)))
+
+    def test_track_is_unique_even_when_identity_collides(self):
+        t = {"SchemaVersion": 2, "Results": [{"Target": "Dockerfile", "Misconfigurations": [
+            {"ID": "DS-0031", "Message": "secret in ENV API_KEY", "Severity": "HIGH",
+             "CauseMetadata": {"StartLine": 7}},
+            {"ID": "DS-0031", "Message": "secret in ENV DB_PASSWORD", "Severity": "HIGH",
+             "CauseMetadata": {"StartLine": 7}}]}]}
+        f = tmpjson(t)
+        m = {"projects": [{"name": "a", "trivy": {"Config": f}}]}
+        for passes in (("exact", "advisory"), ()):
+            rows = build_payload(m, passes=passes)["findings"]
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(len({r["track"] for r in rows}), 2, passes)
+            self.assertEqual(len({r["id"] for r in rows}), 2)
+
+    def test_track_of_an_uncolliding_row_ignores_its_message(self):
+        mk = lambda msg: build_payload({"projects": [{"name": "a", "trivy": {"Config": tmpjson(
+            {"SchemaVersion": 2, "Results": [{"Target": "Dockerfile", "Misconfigurations": [
+                {"ID": "DS-1", "Message": msg, "Severity": "HIGH",
+                 "CauseMetadata": {"StartLine": 2}}]}]})}}]})["findings"][0]["track"]
+        self.assertEqual(mk("old title"), mk("reworded title"))
+
+    def test_identical_rows_with_dedup_off_still_get_distinct_tracks(self):
+        rows = build_payload(load_manifest(), passes=())["findings"]
+        self.assertEqual(len({r["track"] for r in rows}), len(rows))
+
+    # -- unknown stays unknown
+    def test_commit_dirty_is_null_unless_known(self):
+        get = lambda **kw: build_payload({"projects": [dict({"name": "a"}, **kw)]})[
+            "generated_from"][0]["commit_dirty"]
+        self.assertIsNone(get())
+        self.assertIsNone(get(commit_dirty=None))
+        self.assertIs(get(commit_dirty=False), False)
+        self.assertIs(get(commit_dirty=True), True)
+        self.assertIs(get(commit_dirty=1), True)
+
+    # -- Dependabot fetch
+    def test_dependabot_fetch_asks_for_open_and_waived_alerts_exactly(self):
+        from qsd.runner import _dependabot_cmd
+        cmd = _dependabot_cmd("o/r")
+        self.assertIn("/repos/o/r/dependabot/alerts?state=open,dismissed,auto_dismissed&per_page=100", cmd)
+        self.assertIn("--paginate", cmd)
+
+    def test_dependabot_failure_is_noted_and_stderr_is_logged(self):
+        from qsd import runner
+        real_run, real_have = subprocess.run, runner.have
+
+        def fake(cmd, *a, **kw):
+            if cmd[0] != "gh":
+                return real_run(cmd, *a, **kw)
+            kw["stderr"].write("gh: HTTP 403 boom\n")
+            return subprocess.CompletedProcess(cmd, 1)
+        runner.have, subprocess.run = (lambda t: True), fake
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                m, run_dir = runner.scan({"projects": [{"name": "a", "path": ".", "repo": "o/r"}]}, d,
+                                         os.path.join(d, "o"), tools=("dependabot",))
+                self.assertIn("gh api exited 1", m["projects"][0]["notes"]["Dependabot"])
+                with open(os.path.join(run_dir, "logs", "a.dependabot.log")) as fh:
+                    self.assertIn("HTTP 403 boom", fh.read())
+                src = build_payload(m)["sources"]["a: Dependabot"]
+                self.assertEqual((src["collected"], src["optional"]), (False, False))
+        finally:
+            runner.have, subprocess.run = real_have, real_run
+
+    def test_dependabot_parser_reads_concatenated_pages(self):
+        rows, st = dependabot.load(fx("dependabot.json"), "API")
+        self.assertTrue(st["ok"])
+        self.assertGreater(len(rows), 1)
+
+    # -- SonarQube hardening
+    def test_sonar_allowlist_cannot_change_scm_behaviour(self):
+        from qsd.runner import ConfigError, validate
+        with tempfile.TemporaryDirectory() as d:
+            for bad in ("-Dsonar.scm.disabled=false", "-Dsonar.scm.provider=git",
+                        "-Dsonar.scanner.javaExePath=/tmp/x"):
+                with self.assertRaises(ConfigError, msg=bad):
+                    validate({"projects": [{"name": "a", "path": ".", "sonar_args": [bad]}]}, d)
+            validate({"projects": [{"name": "a", "path": ".",
+                                    "sonar_args": ["-Dsonar.scm.exclusions=**/gen/**"]}]}, d)
+
+    def test_scanner_pins_the_host_on_the_command_line(self):
+        from qsd import runner
+        seen = {}
+        real = runner.run
+        def fake(cmd, logfile, cwd=None, env=None):
+            seen.update(cmd=cmd)
+            open(logfile, "w").close()
+            return 1
+        runner.run = fake
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                s = runner.Sonar(d)
+                try:
+                    s.scan(d, "k", os.path.join(d, "x.log"))
+                except runner.SonarError:
+                    pass
+                finally:
+                    shutil_rmtree(s.secret_dir)
+        finally:
+            runner.run = real
+        self.assertIn("-Dsonar.host.url=http://sonarqube:9000", seen["cmd"])
+
+    def test_an_analysis_of_zero_lines_is_incomplete_not_clean(self):
+        doc = {"issues": {"issues": [], "total": 0}, "hotspots": {"hotspots": [], "total": 0},
+               "measures": {"component": {"measures": [{"metric": "ncloc", "value": "0"}]}}}
+        _, st, _ = sonarqube.to_rows(doc, "A")
+        self.assertIn("no lines of code analysed", st["note"])
+        doc["measures"]["component"]["measures"][0]["value"] = "120"
+        self.assertEqual(sonarqube.to_rows(doc, "A")[1]["note"], "")
+
+    # -- CLI and the rest of the review's mutation list
+    def test_strict_and_lenient_together_is_an_error(self):
+        env = dict(os.environ, PYTHONPATH=os.path.join(HERE, "..", "src"))
+        r = subprocess.run([sys.executable, "-m", "qsd", "digest", fx("manifest.json"),
+                            "--strict", "--lenient"], env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("contradict", r.stderr)
+
+    def test_unrated_security_is_counted_separately_from_crit_high(self):
+        r = {"CRITICAL": 0}
+        d = tempfile.mkdtemp()
+        f = os.path.join(d, "s.json")
+        with open(f, "w") as fh:
+            json.dump({"results": [{"check_id": "ssc-1", "path": "p.lock", "start": {"line": 1},
+                                    "extra": {"severity": "UNKNOWN", "message": "x", "metadata": {},
+                                              "sca_info": {"dependency_match": {"found_dependency": {
+                                                  "package": "p"}}}}}]}, fh)
+        s = build_payload({"projects": [{"name": "a", "semgrep": f}]})["generated_from"][0]
+        self.assertEqual((s["sec_unrated"], s["sec_crit_high"]), (1, 0))
+        del r
+
+    def test_crit_tile_is_green_only_when_every_required_source_is_complete(self):
+        p = build_payload(load_manifest())
+        for v in p["sources"].values():
+            v.update(complete=True, collected=True, optional=False)
+        for s in p["generated_from"]:
+            s["sec_crit_high"] = 0
+        self.assertIn('tile ok"><b>0</b><span>Security crit + high', render(p))
+        next(iter(p["sources"].values())).update(complete=False)
+        html_gap = render(p)
+        self.assertNotIn('tile ok"><b>0</b><span>Security crit + high', html_gap)
+        self.assertNotIn('tile bad"><b>0</b><span>Security crit + high', html_gap)
+
+    def test_a_freshclam_failure_marker_makes_clamav_incomplete(self):
+        f = os.path.join(tempfile.mkdtemp(), "c.txt")
+        with open(f, "w") as fh:
+            fh.write("# qsd clamav\n# qsd: freshclam failed\n")
+        _, st = clamav.load(f, "A")
+        self.assertIn("freshclam failed", st["note"])
+        self.assertFalse(st.get("complete", True))
+
+
+def shutil_rmtree(path):
+    import shutil
+    shutil.rmtree(path, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

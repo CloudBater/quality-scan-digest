@@ -80,6 +80,7 @@ qsd scan examples/qsd.example.json --release v1.4.0 --out-dir qsd-out
 | `coverage` | 覆蓋率檔案：checkout 內相對路徑，或 CI artifact 的絕對路徑（只解析） |
 | `sonar_args` | 額外的 `-Dsonar.<允許的鍵>=…` 分析參數（僅 sources／exclusions／語言設定；不可覆寫 scanner／host／token／可執行檔） |
 | `semgrep_mode` | `auto`（預設）、`ci`（必須有 token，絕不退回公開規則）、或 `public` |
+| `semgrep_branch` | 每個專案：`semgrep ci` 把這次掃描歸到哪個分支名稱（`SEMGREP_BRANCH`） |
 
 最上層可設定 `snyk_severity`（預設 `high`）和 `trivy_severity`（預設 `CRITICAL,HIGH`）。這些門檻會記錄在報告的 `settings` 裡，因為「門檻以上沒有發現」和「完全沒有發現」是兩回事。
 
@@ -99,7 +100,11 @@ qsd digest manifest.json --json-out report.json --lenient
 
 SonarQube 可以從匯出的 API 回應（`issues`、`hotspots`、`measures`）讀取，也可以設定 `SONAR_TOKEN` 後，從 `{"host": "...", "project_key": "..."}` 即時讀取。token 只會送往 `https://` 主機，或本機 loopback 上的 HTTP；不會跟隨轉址，也絕不會從 manifest 讀取 token。請使用 user token：analysis token 讀不到 hotspot，報告會標成不完整。
 
-結束代碼：**沒有任何**來源被收集或輸入無效時為 `1`；**預設**在任何必要來源不完整時為 `2`（`--lenient` / `--no-strict` 才放行）。
+結束代碼：**沒有任何**來源被收集或輸入無效時為 `1`；**預設**在任何必要來源不完整時為 `2`（`--lenient` / `--no-strict` 才放行；同時給 `--strict --lenient` 會報錯）。
+
+來源只有在專案的 `skipped` 清單裡列出時才算「選用」（`qsd scan` 會為 `--tools` 沒選的工具、以及沒設定 `guarddog` 清單的 GuardDog 寫入這份清單）。備註文字寫了什麼，都不會讓來源變成選用。手寫 manifest 時，請把你刻意沒跑的列在 `"skipped": ["Semgrep", ...]`；其他缺少的來源都會讓 strict 失敗。
+
+Dependabot 以 `open,dismissed,auto_dismissed` 抓取：被 dismiss 的警示計入 `suppressed`。`fixed` 警示不會抓（那是整段歷史），所以 `qsd scan` 的 `dependabot.fixed` 一律是 0。
 
 ## 去除重複
 
@@ -139,7 +144,7 @@ SonarQube 可以從匯出的 API 回應（`issues`、`hotspots`、`measures`）�
 }
 ```
 
-各工具的嚴重度統一對應到同一個等級（`rank` 0 = CRITICAL/BLOCKER … 4 = INFO，5 = 未評級 `—`）。`security` 依問題的性質判斷（相依套件、container、IaC、設定錯誤、漏洞、hotspot、機密、workflow、惡意程式、套件風險），不看是哪個工具回報的。趨勢／Backstage 請用 **`track`**（不含訊息、較穩定）；**`id`** 是顯示用雜湊，通報文字改寫時會變。被豁免的問題計入 `sources.*.suppressed`，不會默默消失。
+各工具的嚴重度統一對應到同一個等級（`rank` 0 = CRITICAL/BLOCKER … 4 = INFO，5 = 未評級 `—`）。`security` 依問題的性質判斷（相依套件、container、IaC、設定錯誤、漏洞、hotspot、機密、workflow、惡意程式、套件風險），不看是哪個工具回報的。趨勢請用 **`track`**：它在同一份報告內唯一，且不含訊息，所以工具改寫標題不會讓它改變。規則與位置相同的列（例如同一行有兩個機密）會用訊息的雜湊區分，這些列的 `track` 只能盡力維持穩定：同組的另一筆消失，或訊息被改寫時，它可能會變。**`id`** 是顯示用雜湊（包含訊息，工具有回報時也包含欄位）。被豁免的問題計入 `sources.*.suppressed`，不會默默消失。
 
 ## 安全注意事項
 

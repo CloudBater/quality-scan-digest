@@ -5,6 +5,7 @@ schema/report.schema.json for the shape.
 """
 
 import datetime as _dt
+import hashlib
 import os
 
 from . import __version__
@@ -55,10 +56,14 @@ def validate(manifest):
         names.add(name)
         labels.add(label)
         p["name"], p["label"] = name, label
+        # Sources deliberately not run (--tools, or a tool with nothing configured).
+        # Only this list makes a source optional; a note's wording never does.
+        skipped = p.get("skipped")
+        p["skipped"] = [str(x) for x in skipped] if isinstance(skipped, list) else []
         for k in ("repo", "commit"):
             p[k] = _s(p.get(k))
         # None = unknown (git status failed); do not coerce that into "clean".
-        dirty = p.get("commit_dirty", False)
+        dirty = p.get("commit_dirty")
         p["commit_dirty"] = None if dirty is None else bool(dirty)
     manifest["title"] = _s(manifest.get("title"))
     manifest["version"] = _s(manifest.get("version"))
@@ -77,11 +82,12 @@ def collect_project(cfg, sonar_token=""):
     """
     pid, label = cfg["name"], cfg["label"]
     run_notes = cfg.get("notes") or {}
+    skipped = set(cfg.get("skipped") or [])
     rows, sources, measures, deps, dbot = [], {}, {}, None, None
 
     def record(source, st, optional=False):
         note = st["note"]
-        opt = optional or bool(st.get("optional")) or note.startswith("skipped:")
+        opt = optional or bool(st.get("optional")) or source in skipped
         sources[f"{label}: {source}"] = {
             "collected": bool(st["ok"]),
             "complete": bool(st["ok"]) and st.get("complete", not st["note"]),
@@ -169,9 +175,40 @@ def collect_project(cfg, sonar_token=""):
             record("Coverage", {"ok": cov is not None, "note": note})
 
     summary = {"project_id": pid, "project": label, "repo": cfg["repo"], "commit": cfg["commit"],
-               "commit_dirty": cfg.get("commit_dirty", False),
+               "commit_dirty": cfg.get("commit_dirty"),
                "sonar": measures, "coverage": cov, "dependabot": dbot, "deps": deps}
     return rows, summary, sources
+
+
+def _assign_tracks(rows):
+    """Give every row a `track` that is unique within the report.
+
+    Two distinct findings must never share a key, because a consumer that keys on it
+    would merge them. The key is location and identity without the free-text message,
+    so it survives a scanner rewording its title; only rows whose key collides (same
+    rule, file and line, different message, e.g. two Trivy secrets on one line) are
+    told apart by a hash of the message. Rows still identical after that can only
+    exist with dedup off, and get an ordinal suffix. Stability is therefore best
+    effort for colliding rows: if a sibling drops out, the survivor's track reverts.
+    """
+    groups = {}
+    for r in rows:
+        r["track"] = track_key(r)
+        groups.setdefault(r["track"], []).append(r)
+    for group in groups.values():
+        if len(group) == 1:
+            continue
+        for r in group:
+            r["track"] = hashlib.sha256(
+                f"{r['track']}\x1f{r.get('msg', '')}".encode("utf-8")).hexdigest()[:16]
+    seen = {}
+    for r in rows:
+        n = seen.get(r["track"], 0)
+        seen[r["track"]] = n + 1
+        if n:
+            r["track"] = f"{r['track']}-{n + 1}"
+    for r in rows:
+        r.pop("_track", None)
 
 
 def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES):
@@ -185,11 +222,9 @@ def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES):
         sources.update(src)
 
     rows, stats = dedup(raw, passes or ())
+    _assign_tracks(rows)
     seen_id = {}
     for r in rows:
-        # track_key needs private fields; strip them after. No encounter-order
-        # suffix: identity must not flip when siblings reorder or drop out.
-        r["track"] = track_key(r)
         r.pop("_package", None)
         r.pop("_eco", None)
         r.pop("_track", None)

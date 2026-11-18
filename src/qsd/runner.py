@@ -68,7 +68,7 @@ _SONAR_ALLOWED = re.compile(
     r"sources|tests|exclusions|inclusions|"
     r"test\.(exclusions|inclusions)|"
     r"coverage\.exclusions|cpd\.exclusions|"
-    r"scm\.(disabled|exclusions|provider)|"
+    r"scm\.exclusions|"
     r"javascript\.[A-Za-z0-9_.]+|"
     r"typescript\.[A-Za-z0-9_.]+|"
     r"python\.[A-Za-z0-9_.]+|"
@@ -228,6 +228,8 @@ class Sonar:
                "-v", f"{path}:/usr/src:ro", "-e", "SONAR_HOST_URL=http://sonarqube:9000",
                "-e", "SONAR_TOKEN", SCANNER_IMAGE,
                f"-Dsonar.projectKey={key}", "-Dsonar.scm.disabled=true",
+               # A sonar-project.properties in the checkout could otherwise set the host.
+               "-Dsonar.host.url=http://sonarqube:9000",
                "-Dsonar.working.directory=/tmp/.scannerwork"]
         cmd.extend(extra)
         if not os.path.exists(os.path.join(path, "sonar-project.properties")) \
@@ -501,35 +503,13 @@ def _scan_project(pr, raw, logs, tools, settings):
             notes["Dependabot"] = "gh not on PATH"
         else:
             log(f"Dependabot: {cfg['repo']}")
-            # Open findings + dismissed waivers. Fixed alerts are a separate
-            # remediation count in the parser — not "waived".
-            alerts, err = [], ""
-            for state in ("open", "dismissed"):
-                with open(lg(f"dependabot-{state}"), "w") as logfh:
-                    r = subprocess.run(
-                        ["gh", "api",
-                         f"/repos/{cfg['repo']}/dependabot/alerts?state={state}&per_page=100",
-                         "--paginate"], capture_output=True, text=True)
-                if r.returncode != 0:
-                    err = r.stderr.strip() or f"gh api exited {r.returncode}"
-                    break
-                try:
-                    page = json.loads(r.stdout) if r.stdout.strip() else []
-                except json.JSONDecodeError:
-                    err = "gh api returned non-JSON"
-                    break
-                if isinstance(page, list) and page and all(isinstance(a, list) for a in page):
-                    page = [a for chunk in page for a in chunk]
-                if not isinstance(page, list):
-                    err = "gh api returned a non-list"
-                    break
-                alerts.extend(page)
-            if err:
-                notes["Dependabot"] = f"gh api failed, see logs ({err[:120]})"
+            # Open findings plus waived ones (dismissed, auto-dismissed). `fixed` alerts are
+            # left out on purpose: they are the whole history and are not waivers.
+            with open(out["dependabot"], "w") as fh, open(lg("dependabot"), "w") as err:
+                rc = subprocess.run(_dependabot_cmd(cfg["repo"]), stdout=fh, stderr=err).returncode
+            if rc != 0:
+                notes["Dependabot"] = f"gh api exited {rc}, see logs"
                 _rm(out["dependabot"])
-            else:
-                with open(out["dependabot"], "w", encoding="utf-8") as fh:
-                    json.dump(alerts, fh)
 
     if "osv" in tools:
         out["osv"] = {"path": f"{stem}-osv.json"}
@@ -560,7 +540,8 @@ def _scan_project(pr, raw, logs, tools, settings):
             # Still list the source so a missing GuardDog config is not invisible.
             out["guarddog"] = {"(not configured)": {
                 "path": f"{stem}-guarddog.json", "ecosystem": "", "manifest": "(not configured)"}}
-            notes["GuardDog (not configured)"] = "not configured"
+            notes["GuardDog (not configured)"] = "not configured: no `guarddog` list in this project"
+            out.setdefault("skipped", []).append("GuardDog (not configured)")
 
     if cfg.get("coverage"):
         # Relative: a file inside the checkout. Absolute: a file produced elsewhere
@@ -613,12 +594,29 @@ def _semgrep(cfg, path, out, logfile, notes, mode="auto"):
         _rm(out)
 
 
+DEPENDABOT_STATES = "open,dismissed,auto_dismissed"
+
+
+def _dependabot_cmd(repo):
+    # GitHub silently ignores an unknown `state` and returns no alerts (not an error), so
+    # the exact string is pinned by a test.
+    return ["gh", "api", f"/repos/{repo}/dependabot/alerts?state={DEPENDABOT_STATES}&per_page=100",
+            "--paginate"]
+
+
 def _register_skipped(out, notes, tools, cfg, stem):
     """Stub every disabled tool so digest still lists it (optional, not collected)."""
     skip = "skipped: not in --tools"
+    out.setdefault("skipped", [])
+
+    def mark(source, note=skip):
+        """Optional is recorded structurally: a note's wording never makes a gap optional."""
+        notes.setdefault(source, note)
+        if source not in out["skipped"]:
+            out["skipped"].append(source)
     if "sonarqube" not in tools:
         out.setdefault("sonarqube", {})
-        notes.setdefault("SonarQube", skip)
+        mark("SonarQube")
     if "snyk" not in tools:
         products = {"Open Source": f"{stem}-snyk-oss.json", "Code": f"{stem}-snyk-code.json",
                     "IaC": f"{stem}-snyk-iac.json"}
@@ -626,31 +624,31 @@ def _register_skipped(out, notes, tools, cfg, stem):
             products["Container"] = f"{stem}-snyk-container.json"
         out["snyk"] = products
         for p in products:
-            notes.setdefault(f"Snyk {p}", skip)
+            mark(f"Snyk {p}")
     if "trivy" not in tools:
         out["trivy"] = {"Config": f"{stem}-trivy-config.json"}
         if cfg.get("helm"):
             out["trivy"]["Chart"] = f"{stem}-trivy-chart.json"
         for t in out["trivy"]:
-            notes.setdefault(f"Trivy {t}", skip)
+            mark(f"Trivy {t}")
     if "semgrep" not in tools:
         out["semgrep"] = f"{stem}-semgrep.json"
-        notes.setdefault("Semgrep", skip)
+        mark("Semgrep")
     if "dependabot" not in tools:
         out["dependabot"] = f"{stem}-dependabot.json"
-        notes.setdefault("Dependabot", skip)
+        mark("Dependabot")
     if "osv" not in tools:
         out["osv"] = {"path": f"{stem}-osv.json"}
-        notes.setdefault("OSV-Scanner", skip)
+        mark("OSV-Scanner")
     if "zizmor" not in tools:
         out["zizmor"] = {"path": f"{stem}-zizmor.json"}
-        notes.setdefault("zizmor", skip)
+        mark("zizmor")
     if "clamav" not in tools:
         out["clamav"] = f"{stem}-clamav.txt"
-        notes.setdefault("ClamAV", skip)
+        mark("ClamAV")
     if "gitleaks" not in tools:
         out["gitleaks"] = f"{stem}-gitleaks.json"
-        notes.setdefault("Gitleaks", skip)
+        mark("Gitleaks")
     if "guarddog" not in tools:
         if cfg.get("guarddog"):
             out["guarddog"] = {}
@@ -658,11 +656,11 @@ def _register_skipped(out, notes, tools, cfg, stem):
                 label = g["manifest"]
                 out["guarddog"][label] = {"path": f"{stem}-guarddog-{i}.json",
                                           "ecosystem": g["ecosystem"], "manifest": label}
-                notes.setdefault(f"GuardDog {label}", skip)
+                mark(f"GuardDog {label}")
         else:
             out["guarddog"] = {"(not configured)": {
                 "path": f"{stem}-guarddog.json", "ecosystem": "", "manifest": "(not configured)"}}
-            notes.setdefault("GuardDog (not configured)", skip)
+            mark("GuardDog (not configured)")
 
 
 def _clamav(path, out, logfile, notes, settings=None):

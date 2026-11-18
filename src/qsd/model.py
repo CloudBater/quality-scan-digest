@@ -105,15 +105,20 @@ def finding(*, proj, src, kind, sev, msg, loc="", line="", ref="", fix="",
 
 def fingerprint(row):
     """Display id: content hash including the message (advisory text rewrites change it)."""
-    key = "\x1f".join(str(row.get(k, "")) for k in
-                      ("project_id", "src", "kind", "ref", "loc", "line", "col", "msg"))
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    parts = [str(row.get(k, "")) for k in
+             ("project_id", "src", "kind", "ref", "loc", "line", "msg")]
+    # Appended only when the tool reported one, so a row without a column keeps the
+    # exact id it had before columns existed (v0.3.0); only the rows that gained a
+    # column change, once.
+    if row.get("col", "") != "":
+        parts.append(str(row["col"]))
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
 def track_key(row):
     """Stable tracking key: location and identity without the free-text message.
 
-    Backstage / trend diffs should key on this, not `id`, so a scanner rewording
+    Trend diffs should key on this, not `id`, so a scanner rewording
     its title does not look like a new finding. `_track` carries source-stable
     extras (commit SHA for secrets) so two same-line findings stay distinct
     without depending on export order.
