@@ -68,12 +68,17 @@ def norm_package(name, ecosystem=""):
 
 
 def finding(*, proj, src, kind, sev, msg, loc="", line="", ref="", fix="",
-            ids=(), cwe=(), package="", ecosystem="", project_id=None):
+            ids=(), cwe=(), package="", ecosystem="", project_id=None, col="",
+            track=""):
     """One row. Keys without a leading underscore are the export contract."""
     try:
         line = int(line) if line not in (None, "") else ""
     except (TypeError, ValueError):
         line = ""
+    try:
+        col = int(col) if col not in (None, "") else ""
+    except (TypeError, ValueError):
+        col = ""
     return {
         "project_id": project_id if project_id is not None else proj,
         "proj": proj,
@@ -84,6 +89,8 @@ def finding(*, proj, src, kind, sev, msg, loc="", line="", ref="", fix="",
         "loc": loc or "",
         # Tools use 0 or -1 for "no line"; both mean the same as absent.
         "line": line if isinstance(line, int) and line > 0 else "",
+        # Two issues of one rule can share a line; the column is what tells them apart.
+        "col": col if isinstance(col, int) and col >= 0 else "",
         "ref": ref or "",
         "fix": fix or "",
         "ids": sorted(advisory_ids(ids)),
@@ -91,15 +98,44 @@ def finding(*, proj, src, kind, sev, msg, loc="", line="", ref="", fix="",
         "security": kind in SECURITY_KINDS,
         "_package": norm_package(package, ecosystem),
         "_eco": norm_ecosystem(ecosystem),
+        # Parser-supplied disambiguator (e.g. gitleaks commit) — not the free-text msg.
+        "_track": track or "",
     }
 
 
 def fingerprint(row):
-    """Content hash of everything that distinguishes one occurrence from another."""
+    """Display id: content hash including the message (advisory text rewrites change it)."""
+    parts = [str(row.get(k, "")) for k in
+             ("project_id", "src", "kind", "ref", "loc", "line", "msg")]
+    # Appended only when the tool reported one, so a row without a column keeps the
+    # exact id it had before columns existed (v0.3.0); only the rows that gained a
+    # column change, once.
+    if row.get("col", "") != "":
+        parts.append(str(row["col"]))
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def track_key(row):
+    """Stable tracking key: location and identity without the free-text message.
+
+    Trend diffs should key on this, not `id`, so a scanner rewording
+    its title does not look like a new finding. `_track` carries source-stable
+    extras (commit SHA for secrets) so two same-line findings stay distinct
+    without depending on export order.
+    """
+    ids = ",".join(row.get("ids") or [])
     key = "\x1f".join(str(row.get(k, "")) for k in
-                      ("project_id", "src", "kind", "ref", "loc", "line", "msg"))
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+                      ("project_id", "src", "kind", "ref", "loc", "line", "col",
+                       "_package", "_track"))
+    return hashlib.sha256(f"{key}\x1f{ids}".encode("utf-8")).hexdigest()[:16]
 
 
 def is_security(row):
     return bool(row.get("security"))
+
+
+MALWARE_KINDS = {"Malware", "Malicious Package"}
+
+
+def is_malware(row):
+    return row.get("kind") in MALWARE_KINDS

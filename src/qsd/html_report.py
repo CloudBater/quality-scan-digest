@@ -38,9 +38,11 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85em;col
 .tag{font-size:.72rem;padding:.1rem .4rem;border-radius:4px;background:var(--card);border:1px solid var(--line);white-space:nowrap;margin-right:.2rem}
 .empty{padding:2rem;text-align:center;color:var(--mut)}
 footer{margin-top:1.5rem;color:var(--mut);font-size:.78rem;border-top:1px solid var(--line);padding-top:.8rem}
+.banner{background:var(--warnbg);color:var(--warnfg);border-radius:8px;padding:.7rem .9rem;margin:0 0 1rem;font-size:.9rem}
 </style></head><body>
 <h1>__TITLE__</h1>
 <div class="sub">__SUBTITLE__</div>
+__BANNER__
 <h2>Security</h2><div class="tiles">__SEC_TILES__</div>
 <h2>Quality</h2><div class="tiles">__QUAL_TILES__</div>
 <div class="srcs">__CHIPS__</div>
@@ -122,6 +124,10 @@ def _sum(values):
 def render(payload):
     rows, summaries, sources = payload["findings"], payload["generated_from"], payload["sources"]
     crit_high = sum(s["sec_crit_high"] for s in summaries)
+    unrated = sum(s.get("sec_unrated") or 0 for s in summaries)
+    malware = sum(s.get("malware") or 0 for s in summaries)
+    if not malware:
+        malware = sum(1 for r in rows if r.get("kind") in ("Malware", "Malicious Package"))
     sonar = lambda k: _sum((s.get("sonar") or {}).get(k) for s in summaries)  # noqa: E731
     dbot = _sum((s.get("dependabot") or {}).get("unique") for s in summaries)
     ncloc = sonar("ncloc")
@@ -133,12 +139,27 @@ def render(payload):
               for s in summaries if s.get("coverage") and _num((s.get("sonar") or {}).get("ncloc"))]
     stats = payload.get("dedup") or {}
 
+    # Green only when every required source is complete — a zero under a gap is not clean.
+    required = [v for v in sources.values() if not v.get("optional")]
+    gaps = sum(1 for v in required if not v.get("complete"))
+    # Sources that are complete but could only partly scan some files (Semgrep partly
+    # parsed files). Not a gap, but not a full scan either, so never painted green.
+    partial_sources = [(n, v) for n, v in sources.items() if v.get("partial") and v["collected"]]
+    if crit_high:
+        clean_ok = "bad"
+    elif gaps or partial_sources:
+        clean_ok = ""  # zero, but incomplete or partial — neither green nor red
+    else:
+        clean_ok = "ok"
+
+    suppressed = sum(int(v.get("suppressed") or 0) for v in sources.values())
     sec = "".join([
-        _tile("Security crit + high", crit_high, "bad" if crit_high else "ok"),
+        _tile("Security crit + high", crit_high, clean_ok if crit_high == 0 else "bad"),
         _tile("Security findings", sum(s["security"] for s in summaries)),
-        _tile("Malware", sum(1 for r in rows if r["kind"] == "Malware"),
-              "bad" if any(r["kind"] == "Malware" for r in rows) else ""),
+        _tile("Security unrated", unrated, "bad" if unrated else ""),
+        _tile("Malware / malicious pkgs", malware, "bad" if malware else ""),
         _tile("Dependabot advisories", dbot, "bad" if dbot else ""),
+        _tile("Suppressed (waived)", suppressed),
         _tile("Security hotspots", sonar("security_hotspots")),
         _tile("Duplicates merged", stats.get("input", 0) - stats.get("output", 0)),
     ])
@@ -154,24 +175,62 @@ def render(payload):
     ])
 
     def chip(name, v):
+        if v.get("optional") and not v["collected"]:
+            return (f'<span class="chip">○ skipped — {html.escape(name)} '
+                    f'{html.escape(v["note"])}</span>')
         if not v["collected"]:
             return (f'<span class="chip off">✗ not collected — {html.escape(name)} '
                     f'{html.escape(v["note"])}</span>')
         if not v.get("complete", True):
             return f'<span class="chip part">◐ {html.escape(name)} — {html.escape(v["note"])}</span>'
-        return f'<span class="chip on">✓ {html.escape(name)}</span>'
+        if v.get("partial"):
+            return (f'<span class="chip part">◐ {html.escape(name)} — PARTIAL SCAN: '
+                    f'{v["partial"]} file(s) only partly scanned</span>')
+        # A complete source can still carry a note — show it.
+        bits = []
+        if v.get("suppressed"):
+            bits.append(f'{v["suppressed"]} waived')
+        if v.get("note"):
+            bits.append(v["note"])
+        extra = (" — " + " · ".join(bits)) if bits else ""
+        return f'<span class="chip on">✓ {html.escape(name)}{html.escape(extra)}</span>'
 
     chips = "".join(chip(n, v) for n, v in sources.items())
     collected = sum(1 for v in sources.values() if v["collected"])
+    required_n = len(required)
     settings = payload.get("settings") or {}
-    floors = ", ".join(f"{k}: {v}" for k, v in settings.items())
+    # Keep the subtitle short: only floors / mode, not the whole images map.
+    floor_keys = ("snyk_severity", "trivy_severity", "semgrep", "semgrep_mode",
+                  "semgrep_partial_is_gap", "dedup", "tools")
+    def _fmt(v):
+        return str(v).lower() if isinstance(v, bool) else v
+    floors = ", ".join(f"{k}: {_fmt(settings[k])}" for k in floor_keys
+                       if settings.get(k) is not None)
+    dirty = sum(1 for s in summaries if s.get("commit_dirty") is True)
+    unknown_dirty = sum(1 for s in summaries if s.get("commit_dirty") is None)
     subtitle = (f"{html.escape(payload.get('version') or '')} · <b>{len(rows)}</b> findings "
                 f"after merging {stats.get('input', len(rows))} sightings · "
                 f"{collected} of {len(sources)} sources collected"
+                f" · {required_n - gaps}/{required_n} required complete"
+                + (f" · {dirty} dirty checkout(s)" if dirty else "")
+                + (f" · {unknown_dirty} checkout(s) with unknown dirty state" if unknown_dirty else "")
                 + (f" · {html.escape(floors)}" if floors else ""))
+    banners = []
+    if gaps:
+        banners.append(f'<div class="banner">⚠ {gaps} required source(s) incomplete or missing — '
+                       f'a zero count is not a clean scan. Use --lenient only when that is '
+                       f'intentional.</div>')
+    if partial_sources:
+        details = "; ".join(f'{html.escape(n)}: {v["partial"]} file(s)' for n, v in partial_sources)
+        banners.append(f'<div class="banner">◐ <b>PARTIAL SCAN</b> — these sources could only partly '
+                       f'scan some files ({details}). The rest was scanned, but a missing finding '
+                       f'in those files is weaker evidence than elsewhere, so a low or zero count '
+                       f'is not a full-scan result.</div>')
+    banner = "".join(banners)
     parts = {
         "TITLE": html.escape(payload["title"]),
         "SUBTITLE": subtitle,
+        "BANNER": banner,
         "SEC_TILES": sec,
         "QUAL_TILES": qual,
         "CHIPS": chips,

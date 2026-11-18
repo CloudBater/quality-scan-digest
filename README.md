@@ -2,9 +2,17 @@
 
 English | [繁體中文](README.zh-TW.md)
 
-Run ten code, supply-chain, CI/CD, secret and malware scanners against your repositories, merge what
-they report into **one deduplicated list**, and export it as **JSON** (plus an optional
-self-contained HTML report).
+Merge overlapping scanner output into **one deduplicated JSON report** (plus optional HTML)
+with an honest coverage contract: every source is *collected*, *incomplete*, or *not collected*.
+
+This is **not** a DefectDojo / full AppSec platform substitute. It runs a fixed set of
+parsers against tools you already have (or pin by digest), collapses duplicate advisories,
+and refuses to look "clean" when a scan was partial. Trivy here is **`trivy config` only**
+(Dockerfile / Helm); image CVE scanning is **Snyk Container** when you set `image`.
+
+| What it covers | What it does **not** run |
+|---|---|
+| SonarQube quality + hotspots, Snyk OSS/Code/IaC/(optional) Container, Trivy config, Semgrep, Dependabot open alerts, OSV lockfiles (+ `MAL-`), zizmor workflows, Gitleaks history, ClamAV signatures, GuardDog manifests | Trivy `image`/`fs` CVE mode by default, SCA beyond the listed tools, runtime/DAST, ticket workflow |
 
 | | Tool | What it reads | Official repository | Licence |
 |---|---|---|---|---|
@@ -36,12 +44,14 @@ that saw it, and keeps the other sightings in full.
 **A partial scan must look partial.** Every source is reported as *collected*,
 *incomplete* (with what is missing), or *not collected* (with why). A tool that is
 missing, unauthenticated, fails, or writes an error instead of results is never read
-as an empty, clean result. `--strict` turns any gap into a failing exit code.
+as an empty, clean result. **`--strict` is the default** (exit `2` on any required gap);
+use `--lenient` only for local exploration. Tools left out of `--tools` still appear in
+`sources` as `optional` skips so a screenshot cannot hide the rest of the contract.
 
 ## Install
 
 ```bash
-pip install git+https://github.com/CloudBater/quality-scan-digest@v0.3.0
+pip install git+https://github.com/CloudBater/quality-scan-digest@v0.4.0
 qsd --version
 ```
 
@@ -84,7 +94,11 @@ the config file and may not point outside the project. See
 | `gitleaks_mode` | `git` (full history; default inside a repository) or `dir` (files only) |
 | `gitleaks_log_opts` | Limit the history, e.g. `origin/main..HEAD` |
 | `guarddog` | List of `{"ecosystem": "pypi" \| "npm" \| "go" \| "github_action", "manifest": "requirements.txt"}` |
-| `coverage` | Coverage file inside the checkout |
+| `coverage` | Coverage file: relative path inside the checkout, or an absolute path to a CI artifact (parsed only) |
+| `sonar_args` | Extra `-Dsonar.<key>=…` analysis properties from an **exact allowlist**: `sources`, `tests`, the `*.exclusions`/`inclusions` keys, `sourceEncoding`, `projectName`, report paths such as `sonar.python.coverage.reportPaths`, `sonar.python.version`, and a few Java paths. Other language settings (for example `sonar.typescript.tsconfigPaths`) and anything that sets the scanner, host, token or an executable are rejected |
+| `semgrep_mode` | `auto` (default), `ci` (require token, never fall back to public rules), or `public` |
+| `semgrep_partial_is_gap` | default `false`: files Semgrep could only partly parse are a loudly marked **PARTIAL SCAN** (source stays complete, `sources.*.partial` counts the files, terminal + HTML say so). `true` makes them a gap (`incomplete`, strict exits 2). A hard Semgrep error is always incomplete |
+| `semgrep_branch` | Per project: the branch name `semgrep ci` files the run under (`SEMGREP_BRANCH`) |
 
 Top level: `snyk_severity` (default `high`) and `trivy_severity` (default
 `CRITICAL,HIGH`). These floors are recorded in the report's `settings`, because zero
@@ -101,11 +115,14 @@ their own login.
 If your pipeline already runs the tools, point a manifest at their outputs:
 
 ```bash
-qsd digest manifest.json --json-out report.json --html-out report.html --strict
+qsd digest manifest.json --json-out report.json --html-out report.html
+# partial local digests only:
+qsd digest manifest.json --json-out report.json --lenient
 ```
 
 See [`examples/manifest.example.json`](examples/manifest.example.json). Trivy
-vulnerability output (`trivy fs|image --format json`) is also accepted here.
+vulnerability output (`trivy fs|image --format json`) is also accepted here when you
+already produced it; `qsd scan` itself still runs **config** only.
 
 SonarQube is read from exported API responses (`issues`, `hotspots`, `measures`) or
 live from `{"host": "...", "project_key": "..."}` with `SONAR_TOKEN` set. The token is
@@ -113,8 +130,27 @@ only sent to `https://` hosts or plain HTTP on loopback, redirects are never fol
 and a token is never read from the manifest itself. Use a user token: an analysis
 token cannot read hotspots, which is reported as incomplete.
 
-Exit codes: `1` when **no** source was collected or the input is invalid; with
-`--strict`, `2` when any listed source is not collected completely.
+Exit codes: `1` when **no** source was collected or the input is invalid; **`2` by
+default** when any required source is incomplete (`--lenient` / `--no-strict` to allow;
+`--strict --lenient` together is an error).
+
+**Partial is not the same as incomplete.** Some tools can only partly scan some files. Semgrep,
+for example, reports dozens of "file only partly parsed" warnings on an ordinary Django or
+Next.js repository on every run. That does not make the source *incomplete* (a gap that fails
+strict): if it did, every run would fail. It also is not a full scan, so the source carries
+`partial` (the number of files) and every output says **PARTIAL SCAN**: a `!!` block on the
+terminal, a banner and an amber chip in the HTML report, and a "Security crit + high" tile that
+is never painted green. A low or zero count for those files is weaker evidence than elsewhere.
+Set `semgrep_partial_is_gap: true` to make it fail strict.
+
+A source is **optional** only if the project's `skipped` list names it (`qsd scan` writes
+that list for tools left out of `--tools` and for GuardDog with no `guarddog` list). The
+wording of a note never makes a source optional. For a hand-written manifest, list what
+you deliberately did not run under `"skipped": ["Semgrep", ...]`; anything else that is
+missing fails the strict gate.
+
+Dependabot is fetched as `open,dismissed,auto_dismissed`: dismissed alerts count as
+`suppressed`. `fixed` alerts are not fetched, so `dependabot.fixed` is 0 from `qsd scan`.
 
 ## Deduplication
 
@@ -123,9 +159,15 @@ over-counts.
 
 | Pass | Default | Merges rows that share |
 |---|---|---|
-| `exact` | on | project, source, kind, rule, location, line and message |
-| `advisory` | on | project, package (ecosystem-aware name rules), and a CVE/GHSA id. A row with no package joins only when every id it carries points to one package group |
+| `exact` | on | project, source, kind, rule, location, line, **column** and message |
+| `advisory` | on | project, package (ecosystem-aware name rules), and a CVE/GHSA id, from **different** scanners. A row with no package joins only when every id it carries points to one package group |
 | `sast` | **off** | project, file, line and CWE, reported by **different** scanners; each row joins at most one group, so nothing chains |
+
+**Known limitation of `advisory`:** it matches on package and advisory, not on the installed
+version or the manifest. If two manifests install different versions of one package that one
+advisory affects, and two scanners each report one of them, they merge into one row; the other
+occurrence is kept in full under `also` (with its location), and the count shows one finding.
+Use `--dedup exact` if you need one row per occurrence.
 
 The surviving row comes from the richest source, takes the **most severe** severity
 of the group, and keeps every other sighting (message, severity, rule, location, fix)
@@ -140,27 +182,43 @@ Parsers themselves keep every affected version and manifest.
 
 ```jsonc
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
+  "generator": { "name": "quality-scan-digest", "version": "0.4.0" },
   "title": "…", "version": "v1.4.0", "generated_at": "…",
-  "settings": { "snyk_severity": "high", "trivy_severity": "CRITICAL,HIGH", "dedup": "exact,advisory" },
+  "settings": { "snyk_severity": "high", "trivy_severity": "CRITICAL,HIGH", "dedup": "exact,advisory",
+                "tools": "…", "images": {…}, "runners": { "clamav": "container" } },
   "generated_from": [ { "project_id": "api", "project": "API", "repo": "…", "commit": "…",
-                        "sonar": {…}, "coverage": {…}, "dependabot": {…},
-                        "findings": 120, "security": 40, "sec_crit_high": 3, "by_source": {…} } ],
-  "sources": { "API: Semgrep": { "collected": true, "complete": false, "note": "incomplete: 2 scan error(s)" } },
+                        "commit_dirty": false, "sonar": {…}, "coverage": {…}, "dependabot": {…},
+                        "findings": 120, "security": 40, "sec_crit_high": 3, "sec_unrated": 1,
+                        "malware": 2, "by_source": {…} } ],
+  "sources": { "API: Semgrep": { "collected": true, "complete": true,
+                                 "note": "PARTIAL SCAN: 88 file(s) only partly parsed, so Semgrep did not fully scan them (the rest of the repository was scanned)", "suppressed": 0, "partial": 88, "optional": false } },
   "dedup":   { "input": 180, "passes": ["exact", "advisory"], "exact": 4, "advisory": 56, "output": 120 },
-  "findings": [ { "id": "…", "project_id": "api", "proj": "API", "src": "Snyk",
+  "findings": [ { "id": "…", "track": "…", "project_id": "api", "proj": "API", "src": "Snyk",
                   "by": ["Snyk", "Dependabot"], "kind": "Dependency", "security": true,
                   "sev": "HIGH", "rank": 1, "msg": "…", "loc": "poetry.lock: django@4.2.0",
-                  "line": "", "ref": "SNYK-…", "ids": ["CVE-…"], "cwe": ["CWE-89"],
+                  "line": "", "col": "", "ref": "SNYK-…", "ids": ["CVE-…"], "cwe": ["CWE-89"],
                   "fix": "upgrade to …", "also": [ { "src": "Dependabot", "sev": "MEDIUM", "msg": "…" } ] } ]
 }
 ```
 
-Severities are normalised onto one scale (`rank` 0 = CRITICAL/BLOCKER … 4 = INFO).
+Severities are normalised onto one scale (`rank` 0 = CRITICAL/BLOCKER … 4 = INFO, 5 = unrated `—`).
 `security` is decided by what a finding is (dependency, container, IaC,
 misconfiguration, vulnerability, hotspot, secret, workflow, malware, package risk), not by which scanner
-reported it. `id` is a content hash, unique within a report; it changes when the
-finding's message, location or line changes.
+reported it. Use **`track`** for trend identity: it is unique within a report
+and does not include the message, so a scanner rewording a title does not change it. Rows
+whose location and rule collide (two secrets on one line) are told apart by a hash of the
+message, so for those rows `track` is best effort: it can change if a sibling disappears
+or a message is reworded. **`id`** is the display hash (it includes the message, and the
+column when the tool reports one). Waived findings are counted under
+`sources.*.suppressed` where the tool exposes them: Snyk Code SARIF suppressions,
+zizmor `ignored`, Dependabot dismissed/auto_dismissed, and SonarQube issues that are accepted
+or false positive (not fixed ones).
+Snyk Open Source / IaC / Container JSON does not include waivers, so those stay uncounted
+rather than silently zero. If a SonarQube waived-issue count cannot be read, the source says
+"waived-issue count unavailable" instead of reporting 0. `qsd scan` exports the SonarQube
+count, so a digest of its raw outputs carries it too. The count needs SonarQube 10.4 or newer:
+an older server may ignore the `issueStatuses` filter and over-count.
 
 ## Security notes
 

@@ -2,7 +2,13 @@
 
 [English](README.md) | 繁體中文
 
-對你的 repository 執行十種程式碼、供應鏈、CI/CD、機密外洩與惡意程式掃描工具，把結果合併成**一份去除重複的清單**，並輸出成 **JSON**（也可以另外產生一份獨立的 HTML 報告）。
+把多個掃描器重疊的輸出合併成**一份去除重複的 JSON 報告**（可另產 HTML），並帶誠實的涵蓋合約：每個來源都是*已收集*、*不完整*或*未收集*。
+
+這**不是** DefectDojo／完整 AppSec 平台的替代品。它對你已有的（或以 digest 鎖定的）工具做固定解析、合併重複通報，並在掃描不完整時拒絕看起來「乾淨」。這裡的 Trivy 只跑 **`trivy config`**（Dockerfile／Helm）；映像檔 CVE 請用設定了 `image` 的 **Snyk Container**。
+
+| 有涵蓋 | **不會**預設跑 |
+|---|---|
+| SonarQube、Snyk OSS/Code/IaC／（可選）Container、Trivy config、Semgrep、Dependabot 未結案、OSV lockfile（含 `MAL-`）、zizmor、Gitleaks、ClamAV、GuardDog | 預設的 Trivy `image`/`fs` CVE、上表以外的 SCA、runtime/DAST、工單流程 |
 
 | | 工具 | 掃描內容 | 官方 repository | 授權 |
 |---|---|---|---|---|
@@ -27,12 +33,12 @@
 
 **工具之間會重疊。** Snyk、Semgrep Supply Chain、OSV-Scanner、Trivy 和 Dependabot 讀的是同一批漏洞資料庫，同一個有漏洞的套件可能出現四、五次，報告上的每個數字都會被灌水。`qsd` 讓每個問題只列一次，記下有哪些工具看到它，其他工具的回報也完整保留。
 
-**沒掃完就要看得出沒掃完。** 每個來源都會標成*已收集*、*不完整*（附上缺了什麼）或*未收集*（附上原因）。工具沒安裝、沒登入、執行失敗，或輸出的是錯誤訊息而不是結果，都絕不會被當成「掃描乾淨」。加上 `--strict`，任何缺口都會讓程式以失敗結束。
+**沒掃完就要看得出沒掃完。** 每個來源都會標成*已收集*、*不完整*（附上缺了什麼）或*未收集*（附上原因）。工具沒安裝、沒登入、執行失敗，或輸出的是錯誤訊息而不是結果，都絕不會被當成「掃描乾淨」。**預設就是 `--strict`**（必要來源有缺口則結束碼 `2`）；本機探索不完整結果時才用 `--lenient`。`--tools` 沒選到的工具仍會出現在 `sources`（標成 `optional`），截圖無法假裝「只掃了這些」。
 
 ## 安裝
 
 ```bash
-pip install git+https://github.com/CloudBater/quality-scan-digest@v0.3.0
+pip install git+https://github.com/CloudBater/quality-scan-digest@v0.4.0
 qsd --version
 ```
 
@@ -71,7 +77,11 @@ qsd scan examples/qsd.example.json --release v1.4.0 --out-dir qsd-out
 | `gitleaks_mode` | `git`（掃完整歷史；在 repository 內的預設值）或 `dir`（只掃檔案） |
 | `gitleaks_log_opts` | 限縮掃描的歷史範圍，例如 `origin/main..HEAD` |
 | `guarddog` | 清單，例如 `{"ecosystem": "pypi" \| "npm" \| "go" \| "github_action", "manifest": "requirements.txt"}` |
-| `coverage` | checkout 內的覆蓋率檔案 |
+| `coverage` | 覆蓋率檔案：checkout 內相對路徑，或 CI artifact 的絕對路徑（只解析） |
+| `sonar_args` | 額外的 `-Dsonar.<鍵>=…` 分析參數，只接受**精確白名單**：`sources`、`tests`、各種 `exclusions`／`inclusions`、`sourceEncoding`、`projectName`、報告路徑（如 `sonar.python.coverage.reportPaths`）、`sonar.python.version` 與少數 Java 路徑。其他語言設定（例如 `sonar.typescript.tsconfigPaths`），以及任何會改 scanner、host、token 或可執行檔的鍵，一律拒絕 |
+| `semgrep_mode` | `auto`（預設）、`ci`（必須有 token，絕不退回公開規則）、或 `public` |
+| `semgrep_partial_is_gap` | 預設 `false`：Semgrep 只能部分解析的檔案算醒目標示的**部分掃描（PARTIAL SCAN）**：來源仍算完整，`sources.*.partial` 記錄檔案數，終端機與 HTML 都會明講。`true` 則算缺口（`incomplete`，strict 結束代碼 2）。Semgrep 的嚴重錯誤一律算不完整 |
+| `semgrep_branch` | 每個專案：`semgrep ci` 把這次掃描歸到哪個分支名稱（`SEMGREP_BRANCH`） |
 
 最上層可設定 `snyk_severity`（預設 `high`）和 `trivy_severity`（預設 `CRITICAL,HIGH`）。這些門檻會記錄在報告的 `settings` 裡，因為「門檻以上沒有發現」和「完全沒有發現」是兩回事。
 
@@ -82,23 +92,33 @@ qsd scan examples/qsd.example.json --release v1.4.0 --out-dir qsd-out
 如果你的 pipeline 已經跑過這些工具，用 manifest 指向它們的輸出即可：
 
 ```bash
-qsd digest manifest.json --json-out report.json --html-out report.html --strict
+qsd digest manifest.json --json-out report.json --html-out report.html
+# 本機 digests 允許不完整時：
+qsd digest manifest.json --json-out report.json --lenient
 ```
 
-範例見 [`examples/manifest.example.json`](examples/manifest.example.json)。這裡也接受 Trivy 的漏洞輸出（`trivy fs|image --format json`）。
+範例見 [`examples/manifest.example.json`](examples/manifest.example.json)。若你已自行產出，這裡也接受 Trivy 漏洞輸出（`trivy fs|image --format json`）；`qsd scan` 本身仍只跑 **config**。
 
 SonarQube 可以從匯出的 API 回應（`issues`、`hotspots`、`measures`）讀取，也可以設定 `SONAR_TOKEN` 後，從 `{"host": "...", "project_key": "..."}` 即時讀取。token 只會送往 `https://` 主機，或本機 loopback 上的 HTTP；不會跟隨轉址，也絕不會從 manifest 讀取 token。請使用 user token：analysis token 讀不到 hotspot，報告會標成不完整。
 
-結束代碼：**沒有任何**來源被收集或輸入無效時為 `1`；加上 `--strict` 時，任何列出的來源沒有完整收集則為 `2`。
+結束代碼：**沒有任何**來源被收集或輸入無效時為 `1`；**預設**在任何必要來源不完整時為 `2`（`--lenient` / `--no-strict` 才放行；同時給 `--strict --lenient` 會報錯）。
+
+**部分掃描（partial）不等於不完整（incomplete）。** 有些工具只能部分掃描某些檔案；例如 Semgrep 在一般的 Django 或 Next.js repository 上，每次都會回報數十個「檔案只能部分解析」的警告。這不會讓來源變成*不完整*（會讓 strict 失敗的缺口），否則每次都會失敗；但它也不是完整掃描，所以來源會帶 `partial`（檔案數），所有輸出都會標明 **PARTIAL SCAN**：終端機的 `!!` 區塊、HTML 的橫幅與琥珀色標籤，而且「Security crit + high」方塊絕不會顯示成綠色。對這些檔案而言，低數字或零，證據力比其他地方弱。設 `semgrep_partial_is_gap: true` 可讓它讓 strict 失敗。
+
+來源只有在專案的 `skipped` 清單裡列出時才算「選用」（`qsd scan` 會為 `--tools` 沒選的工具、以及沒設定 `guarddog` 清單的 GuardDog 寫入這份清單）。備註文字寫了什麼，都不會讓來源變成選用。手寫 manifest 時，請把你刻意沒跑的列在 `"skipped": ["Semgrep", ...]`；其他缺少的來源都會讓 strict 失敗。
+
+Dependabot 以 `open,dismissed,auto_dismissed` 抓取：被 dismiss 的警示計入 `suppressed`。`fixed` 警示不會抓（那是整段歷史），所以 `qsd scan` 的 `dependabot.fixed` 一律是 0。
 
 ## 去除重複
+
+**`advisory` 的已知限制：** 它依套件與通報編號比對，不看安裝的版本或 manifest。如果兩個 manifest 安裝了同一個套件的不同版本，而且同一則通報都影響它們，並且兩個掃描器各回報其中一個，這兩筆會合併成一列；另一個出現處會完整保留在 `also`（含位置），但計數只算一個發現。需要「每個出現處各一列」時，請用 `--dedup exact`。
 
 每一輪都刻意保守：合併錯了會把問題藏起來，漏合併只是多算幾筆。
 
 | 規則 | 預設 | 合併條件 |
 |---|---|---|
-| `exact` | 開 | 同專案、同工具、同類型、同規則、同位置、同行號、同訊息 |
-| `advisory` | 開 | 同專案、同套件（依生態系的命名規則比對），且有共同的 CVE/GHSA 編號。沒有套件名稱的資料，只有在它所有編號都指向同一個套件時才會併入 |
+| `exact` | 開 | 同專案、同工具、同類型、同規則、同位置、同行號、**同欄位**、同訊息 |
+| `advisory` | 開 | 同專案、同套件（依生態系的命名規則比對），且有共同的 CVE/GHSA 編號，且來自**不同**掃描器。沒有套件名稱的資料，只有在它所有編號都指向同一個套件時才會併入 |
 | `sast` | **關** | 同專案、同檔案、同行號、同 CWE，且由**不同**工具回報；每筆資料最多加入一組，不會串連合併 |
 
 合併後保留資訊最完整的那筆，嚴重度取整組中**最嚴重**的，其他工具的回報（訊息、嚴重度、規則、位置、修正建議）完整放在 `also` 底下。`by` 列出所有看到它的工具。不同專案之間絕不合併；Snyk IaC 和 Trivy 的規則編號彼此無關，所以設定錯誤類的問題不會合併。可用 `--dedup exact,advisory,sast` 選擇規則，或用 `--dedup none` 關閉。解析器本身會保留每個受影響的版本與 manifest。
@@ -109,23 +129,27 @@ SonarQube 可以從匯出的 API 回應（`issues`、`hotspots`、`measures`）�
 
 ```jsonc
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
+  "generator": { "name": "quality-scan-digest", "version": "0.4.0" },
   "title": "…", "version": "v1.4.0", "generated_at": "…",
-  "settings": { "snyk_severity": "high", "trivy_severity": "CRITICAL,HIGH", "dedup": "exact,advisory" },
+  "settings": { "snyk_severity": "high", "trivy_severity": "CRITICAL,HIGH", "dedup": "exact,advisory",
+                "tools": "…", "images": {…}, "runners": { "clamav": "container" } },
   "generated_from": [ { "project_id": "api", "project": "API", "repo": "…", "commit": "…",
-                        "sonar": {…}, "coverage": {…}, "dependabot": {…},
-                        "findings": 120, "security": 40, "sec_crit_high": 3, "by_source": {…} } ],
-  "sources": { "API: Semgrep": { "collected": true, "complete": false, "note": "incomplete: 2 scan error(s)" } },
+                        "commit_dirty": false, "sonar": {…}, "coverage": {…}, "dependabot": {…},
+                        "findings": 120, "security": 40, "sec_crit_high": 3, "sec_unrated": 1,
+                        "malware": 2, "by_source": {…} } ],
+  "sources": { "API: Semgrep": { "collected": true, "complete": true,
+                                 "note": "PARTIAL SCAN: 88 file(s) only partly parsed, so Semgrep did not fully scan them (the rest of the repository was scanned)", "suppressed": 0, "partial": 88, "optional": false } },
   "dedup":   { "input": 180, "passes": ["exact", "advisory"], "exact": 4, "advisory": 56, "output": 120 },
-  "findings": [ { "id": "…", "project_id": "api", "proj": "API", "src": "Snyk",
+  "findings": [ { "id": "…", "track": "…", "project_id": "api", "proj": "API", "src": "Snyk",
                   "by": ["Snyk", "Dependabot"], "kind": "Dependency", "security": true,
                   "sev": "HIGH", "rank": 1, "msg": "…", "loc": "poetry.lock: django@4.2.0",
-                  "line": "", "ref": "SNYK-…", "ids": ["CVE-…"], "cwe": ["CWE-89"],
+                  "line": "", "col": "", "ref": "SNYK-…", "ids": ["CVE-…"], "cwe": ["CWE-89"],
                   "fix": "upgrade to …", "also": [ { "src": "Dependabot", "sev": "MEDIUM", "msg": "…" } ] } ]
 }
 ```
 
-各工具的嚴重度統一對應到同一個等級（`rank` 0 = CRITICAL/BLOCKER … 4 = INFO）。`security` 依問題的性質判斷（相依套件、container、IaC、設定錯誤、漏洞、hotspot、機密、workflow、惡意程式、套件風險），不看是哪個工具回報的。`id` 是內容雜湊，在同一份報告中不會重複；訊息、位置或行號改變時它也會跟著改變。
+各工具的嚴重度統一對應到同一個等級（`rank` 0 = CRITICAL/BLOCKER … 4 = INFO，5 = 未評級 `—`）。`security` 依問題的性質判斷（相依套件、container、IaC、設定錯誤、漏洞、hotspot、機密、workflow、惡意程式、套件風險），不看是哪個工具回報的。趨勢請用 **`track`**：它在同一份報告內唯一，且不含訊息，所以工具改寫標題不會讓它改變。規則與位置相同的列（例如同一行有兩個機密）會用訊息的雜湊區分，這些列的 `track` 只能盡力維持穩定：同組的另一筆消失，或訊息被改寫時，它可能會變。**`id`** 是顯示用雜湊（包含訊息，工具有回報時也包含欄位）。被豁免的問題在工具有提供時計入 `sources.*.suppressed`：Snyk Code SARIF suppressions、zizmor `ignored`、Dependabot dismissed／auto_dismissed、以及 SonarQube 中狀態為 ACCEPTED 或 FALSE_POSITIVE 的 issues（不含已修復的）。`qsd scan` 也會匯出 SonarQube 的豁免數量，所以拿它的原始輸出做 digest 也看得到。Snyk OSS／IaC／Container JSON 不含豁免資訊，因此不會假裝算過；讀不到 SonarQube 豁免數量時，來源會寫「waived-issue count unavailable」，而不是 0。SonarQube 豁免數量需要 10.4 以上的伺服器（較舊的伺服器可能忽略 `issueStatuses`，數字會偏高）。
 
 ## 安全注意事項
 

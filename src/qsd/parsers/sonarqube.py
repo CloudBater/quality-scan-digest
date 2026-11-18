@@ -78,11 +78,37 @@ def fetch_all(host, token, path, params, key):
         page += 1
 
 
+def waived_count(host, token, project_key):
+    """(count, error): issues someone ACCEPTED or marked FALSE_POSITIVE.
+
+    `resolved=true` is the wrong question: it also covers FIXED and REMOVED, which are
+    closed fixes, not waivers (SonarQube lists FALSE-POSITIVE, WONTFIX, FIXED, REMOVED as
+    resolutions). Servers older than 10.4 do not know `issueStatuses`, so they get the
+    older `resolutions` filter. On failure the count is None with the reason, never 0:
+    an unknown count must not read as "nothing waived".
+    """
+    last = ""
+    for params in ({"issueStatuses": "ACCEPTED,FALSE_POSITIVE"},
+                   {"resolutions": "FALSE-POSITIVE,WONTFIX"}):
+        try:
+            data = api(host, token, "/api/issues/search",
+                       {"components": project_key, "ps": 1, **params})
+            return int((data.get("paging") or {}).get("total") or 0), ""
+        except (SonarError, Forbidden, TypeError, ValueError) as exc:
+            last = str(exc) or exc.__class__.__name__
+    return None, last
+
+
 def fetch(host, token, project_key):
     """Read one project from a server into the same shape `export` writes."""
     issues, total = fetch_all(host, token, "/api/issues/search",
                               {"components": project_key, "resolved": "false"}, "issues")
     doc = {"issues": {"issues": issues, "total": total}}
+    # Accepted / false-positive issues are waived, not open findings: counted only.
+    count, err = waived_count(host, token, project_key)
+    doc["suppressed"] = count or 0
+    if count is None:
+        doc["suppressed_error"] = err
     try:
         hs, htotal = fetch_all(host, token, "/api/hotspots/search",
                                {"project": project_key, "status": "TO_REVIEW"}, "hotspots")
@@ -98,7 +124,13 @@ def load_files(cfg):
     """Read an exported issues/hotspots/measures set. Issues are required."""
     if not cfg.get("issues"):
         raise SonarError("no issues export")
-    doc = {"issues": read_json(cfg["issues"])}
+    issues = read_json(cfg["issues"])
+    doc = {"issues": issues}
+    # `qsd scan` exports the waived count inside the issues document.
+    if isinstance(issues, dict):
+        for key in ("suppressed", "suppressed_error"):
+            if key in issues:
+                doc[key] = issues[key]
     if cfg.get("hotspots"):
         doc["hotspots"] = read_json(cfg["hotspots"])
     if cfg.get("measures"):
@@ -132,6 +164,15 @@ def to_rows(doc, label, project_id=None):
                 (doc.get("measures") or {}).get("component", {}).get("measures", [])}
     if not measures:
         notes.append("incomplete: no measures")
+    else:
+        try:
+            analysed = float(measures.get("ncloc") or 0)
+        except (TypeError, ValueError):
+            analysed = 0
+        # A bogus `sonar.sources` or an exclusion like `**` analyses nothing and would
+        # otherwise read as a clean project.
+        if analysed <= 0:
+            notes.append("incomplete: no lines of code analysed (check sonar.sources and exclusions)")
 
     rows = []
     for i in issues:
@@ -141,6 +182,7 @@ def to_rows(doc, label, project_id=None):
             sev=i.get("severity"), msg=i.get("message", ""),
             loc=(i.get("component") or "").split(":", 1)[-1],
             line=i.get("line"), ref=i.get("rule", ""),
+            col=(i.get("textRange") or {}).get("startOffset"),
         ))
     for h in hotspots:
         rows.append(finding(
@@ -148,5 +190,11 @@ def to_rows(doc, label, project_id=None):
             sev=h.get("vulnerabilityProbability"), msg=h.get("message", ""),
             loc=(h.get("component") or "").split(":", 1)[-1],
             line=h.get("line"), ref=h.get("ruleKey", ""),
+            col=(h.get("textRange") or {}).get("startOffset"),
         ))
-    return rows, status(note="; ".join(notes)), measures
+    # Not a gap in the findings, but it must not pass silently as "0 waived".
+    info = []
+    if doc.get("suppressed_error"):
+        info.append(f"waived-issue count unavailable ({str(doc['suppressed_error'])[:80]})")
+    return rows, status(note="; ".join(notes + info), complete=not notes,
+                        suppressed=int(doc.get("suppressed") or 0)), measures

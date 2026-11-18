@@ -12,6 +12,7 @@ import base64
 import datetime as _dt
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -24,7 +25,7 @@ import urllib.request
 from importlib import resources
 
 from .model import safe_name
-from .parsers.sonarqube import MEASURE_KEYS, Forbidden, SonarError, api, fetch_all
+from .parsers.sonarqube import MEASURE_KEYS, Forbidden, SonarError, api, fetch_all, waived_count
 
 TOOLS = ("sonarqube", "snyk", "trivy", "semgrep", "dependabot", "osv", "zizmor", "clamav",
          "guarddog", "gitleaks")
@@ -59,6 +60,36 @@ class ConfigError(ValueError):
     pass
 
 
+# Exact allowlist only — language wildcards (javascript.*, python.*) accepted
+# executable-shaped and scope-hiding keys (node, pylint, file.suffixes).
+_SONAR_ARG = re.compile(r"^-Dsonar\.[A-Za-z0-9_.]+=.+$")
+_SONAR_ALLOWED = frozenset({
+    "sonar.sources", "sonar.tests", "sonar.exclusions", "sonar.inclusions",
+    "sonar.sourceEncoding", "sonar.projectName",
+    "sonar.test.exclusions", "sonar.test.inclusions",
+    "sonar.coverage.exclusions", "sonar.cpd.exclusions", "sonar.scm.exclusions",
+    "sonar.java.binaries", "sonar.java.libraries", "sonar.java.test.binaries",
+    # Coverage / test report imports — paths to reports, not executables.
+    "sonar.javascript.lcov.reportPaths", "sonar.typescript.lcov.reportPaths",
+    "sonar.python.coverage.reportPaths", "sonar.python.xunit.reportPath",
+    "sonar.coverage.jacoco.xmlReportPaths", "sonar.junit.reportPaths",
+    "sonar.python.version",
+})
+# What a checkout's own sonar-project.properties may NOT set. The scanner container
+# receives SONAR_TOKEN, so anything that makes it run a checkout-supplied binary or
+# send the token elsewhere is a token-theft path.
+#
+# Only keys the command line does NOT already pin are listed. The scanner command
+# overrides the file for sonar.projectKey, sonar.host.url, sonar.working.directory,
+# sonar.scm.disabled and sonar.nodejs.executable (command-line -D beats the properties
+# file), so forbidding those would add nothing and would reject ordinary files: a
+# SonarCloud-style `sonar.projectKey=myapp` line is common in real repositories.
+_SONAR_PROPS_FORBIDDEN_PREFIXES = ("sonar.scanner.", "sonar.login", "sonar.password",
+                                   "sonar.token")
+_SONAR_PROPS_FORBIDDEN = frozenset({"sonar.nodejs.forceExecutable", "sonar.userHome"})
+SEMGREP_MODES = ("auto", "ci", "public")
+
+
 def log(msg):
     print(f"==> {msg}", file=sys.stderr)
 
@@ -77,11 +108,19 @@ def have(tool):
 
 
 def git_sha(path):
+    """Return (sha, dirty). dirty is True/False, or None when git status is unknown."""
     try:
-        return subprocess.check_output(["git", "-C", path, "rev-parse", "HEAD"],
-                                       text=True, stderr=subprocess.DEVNULL).strip()
+        sha = subprocess.check_output(["git", "-C", path, "rev-parse", "HEAD"],
+                                      text=True, stderr=subprocess.DEVNULL).strip()
     except (OSError, subprocess.CalledProcessError):
-        return ""
+        return "", None
+    try:
+        porcelain = subprocess.check_output(
+            ["git", "-C", path, "status", "--porcelain"],
+            text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return sha, None
+    return sha, bool(porcelain.strip())
 
 
 def _nonempty(path):
@@ -104,6 +143,88 @@ def _inside(base, *parts):
     return p
 
 
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "f": "\f"}
+
+
+def _key_of(logical):
+    """The key of one logical properties line (see _properties_keys)."""
+    key, i = [], 0
+    while i < len(logical):
+        ch = logical[i]
+        if ch == "\\" and i + 1 < len(logical):
+            nxt = logical[i + 1]
+            if nxt == "u" and re.fullmatch(r"[0-9a-fA-F]{4}", logical[i + 2:i + 6] or ""):
+                key.append(chr(int(logical[i + 2:i + 6], 16)))
+                i += 6
+                continue
+            key.append(_ESCAPES.get(nxt, nxt))
+            i += 2
+            continue
+        if ch in "=: \t\f":
+            break
+        key.append(ch)
+        i += 1
+    return "".join(key)
+
+
+def _properties_keys(text):
+    """Keys of a Java .properties file, parsed by Java's rules.
+
+    A key ends at the first unescaped `=`, `:` or whitespace (so `a.b:c` and `a.b c` set
+    key `a.b` just like `a.b=c`); a line starting with `#` or `!` is a comment (`#`
+    later in a line is not); a trailing backslash continues the line, **including at the
+    end of the file**, where Java still keeps the pending line; keys may contain
+    backslash escapes and \\uXXXX. A parser that only split on `=`, or that dropped a
+    pending line at EOF, could be bypassed.
+    """
+    keys, logical, carry = [], "", False
+    # NOT str.splitlines(): it also breaks at \f, \v, \x1c-\x1e, \x85, U+2028 and U+2029, which
+    # Java does not. "# comment<FF>x \" then a forbidden key would be one continued comment to
+    # Java but two lines to Python, and the forbidden key would be swallowed.
+    for raw in re.split(r"\r\n|\r|\n", text):
+        line = raw if carry else raw.lstrip(" \t\f")
+        if not carry and (not line or line[0] in "#!"):
+            continue
+        if carry:
+            line = line.lstrip(" \t\f")
+        slashes = len(line) - len(line.rstrip("\\"))
+        if slashes % 2:  # odd number of trailing backslashes: the line continues
+            logical, carry = logical + line[:-1], True
+            continue
+        logical, carry = logical + line, False
+        key = _key_of(logical)
+        if key:
+            keys.append(key)
+        logical = ""
+    if carry and logical:  # the file ends in the middle of a continued line
+        key = _key_of(logical)
+        if key:
+            keys.append(key)
+    return keys
+
+
+def _reject_dangerous_sonar_properties(path):
+    """Refuse a checkout sonar-project.properties that could redirect the scanner or token."""
+    props = os.path.join(path, "sonar-project.properties")
+    # lstat, not isfile: a symlink (even a dangling one on the host, such as one pointing at
+    # /usr/src/payload.properties) would resolve to checkout-controlled bytes INSIDE the
+    # scanner container, and this host-side check would never have read them.
+    if os.path.islink(props):
+        raise SonarError("sonar-project.properties is a symlink; it is read inside the "
+                         "scanner container, so it cannot be validated here")
+    if not os.path.isfile(props):
+        return
+    try:
+        with open(props, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        raise SonarError(f"cannot read sonar-project.properties ({exc.__class__.__name__})") from exc
+    for key in _properties_keys(text):
+        if key in _SONAR_PROPS_FORBIDDEN or key.startswith(_SONAR_PROPS_FORBIDDEN_PREFIXES):
+            raise SonarError(f"sonar-project.properties sets {key}, which could run a "
+                             f"checkout-supplied program or send the token elsewhere")
+
+
 def validate(config, base):
     projects = config.get("projects")
     if not isinstance(projects, list) or not projects:
@@ -120,6 +241,19 @@ def validate(config, base):
         labels.add(label)
         if not p.get("path") or not os.path.isdir(os.path.join(base, p["path"])):
             raise ConfigError(f"{name}: `path` is not a directory")
+        for arg in p.get("sonar_args") or []:
+            if not _SONAR_ARG.match(str(arg)):
+                raise ConfigError(f"{name}: sonar_args entry {arg!r} must be -Dsonar.<key>=<value>")
+            key = str(arg).split("=", 1)[0][2:]
+            if key not in _SONAR_ALLOWED:
+                raise ConfigError(f"{name}: sonar_args entry {arg!r} is not an allowed analysis "
+                                  f"property (exact allowlist only; no wildcards or executables)")
+    partial = config.get("semgrep_partial_is_gap", False)
+    if not isinstance(partial, bool):
+        raise ConfigError("semgrep_partial_is_gap must be true or false")
+    mode = config.get("semgrep_mode", "auto")
+    if mode not in SEMGREP_MODES:
+        raise ConfigError(f"semgrep_mode must be one of {', '.join(SEMGREP_MODES)}")
 
 
 # --------------------------------------------------------------------------
@@ -183,16 +317,28 @@ class Sonar:
                    {"login": "admin", "previousPassword": "admin",
                     "password": secrets.token_urlsafe(24) + "aA1!"}, self.token, "")
 
-    def scan(self, path, key, logfile):
+    def scan(self, path, key, logfile, extra=()):
         log(f"SonarQube: {key}")
+        _reject_dangerous_sonar_properties(path)
         # Joins the compose network (no host networking), mounts the source
         # read-only, and takes the token from the environment, not argv.
         cmd = ["docker", "run", "--rm", "--network", f"{self.project}_default",
                "-v", f"{path}:/usr/src:ro", "-e", "SONAR_HOST_URL=http://sonarqube:9000",
                "-e", "SONAR_TOKEN", SCANNER_IMAGE,
                f"-Dsonar.projectKey={key}", "-Dsonar.scm.disabled=true",
-               "-Dsonar.working.directory=/tmp/.scannerwork"]
-        if not os.path.exists(os.path.join(path, "sonar-project.properties")):
+               # A sonar-project.properties in the checkout could otherwise set the host
+               # or an executable that runs with SONAR_TOKEN; pin/clear those here.
+               "-Dsonar.host.url=http://sonarqube:9000",
+               "-Dsonar.working.directory=/tmp/.scannerwork",
+               # The scanner reuses a cached engine/plugin jar from its user home, so a
+               # checkout that moved it to /usr/src could make the JVM (which holds
+               # SONAR_TOKEN) run checkout-supplied code. Pinned here: the command line wins.
+               "-Dsonar.userHome=/tmp/.sonar",
+               # Force the image's `node` on PATH — never a checkout-supplied binary.
+               "-Dsonar.nodejs.executable=node"]
+        cmd.extend(extra)
+        if not os.path.exists(os.path.join(path, "sonar-project.properties")) \
+                and not any(str(a).startswith("-Dsonar.sources=") for a in extra):
             cmd.append("-Dsonar.sources=.")
         rc = run(cmd, logfile, env={**os.environ, "SONAR_TOKEN": self.token})
         with open(logfile, encoding="utf-8", errors="replace") as fh:
@@ -225,8 +371,13 @@ class Sonar:
             hotspots = {"hotspots": [], "error": "forbidden: token is not a user token"}
         measures = api(self.host, self.token, "/api/measures/component",
                        {"component": key, "metricKeys": MEASURE_KEYS})
+        issues_doc = {"issues": issues, "total": total}
+        waived, err = waived_count(self.host, self.token, key)
+        issues_doc["suppressed"] = waived or 0
+        if waived is None:
+            issues_doc["suppressed_error"] = err
         out = {}
-        for name, doc in (("issues", {"issues": issues, "total": total}),
+        for name, doc in (("issues", issues_doc),
                           ("hotspots", hotspots), ("measures", measures)):
             path = os.path.join(raw, f"sonar-{key}-{name}.json")
             with open(path, "w", encoding="utf-8") as fh:
@@ -318,14 +469,27 @@ def scan(config, base, out_dir, version="", tools=TOOLS):
 
     settings = {"snyk_severity": config.get("snyk_severity", "high"),
                 "trivy_severity": config.get("trivy_severity", "CRITICAL,HIGH"),
-                "semgrep": "org policy (semgrep ci)" if os.environ.get("SEMGREP_APP_TOKEN")
-                else "public ruleset"}
+                "semgrep": _semgrep_label(config.get("semgrep_mode", "auto")),
+                "semgrep_mode": config.get("semgrep_mode", "auto"),
+                "semgrep_partial_is_gap": bool(config.get("semgrep_partial_is_gap", False)),
+                "tools": ",".join(tools),
+                # Digests actually referenced this run — pin ≠ what ran if PATH wins.
+                "images": {
+                    "sonar_scanner": SCANNER_IMAGE,
+                    "clamav": CLAMAV_IMAGE,
+                    "gitleaks": GITLEAKS_IMAGE,
+                    "osv": OSV_IMAGE,
+                    "zizmor": ZIZMOR_IMAGE,
+                },
+                "runners": {}}
     projects = []
     for p in config["projects"]:
         path = os.path.realpath(os.path.join(base, p["path"]))
+        sha, dirty = git_sha(path)
         projects.append({"cfg": p, "path": path, "name": p["name"], "out": {
             "name": p["name"], "label": p.get("label") or p["name"],
-            "repo": p.get("repo", ""), "commit": git_sha(path), "notes": {}}})
+            "repo": p.get("repo", ""), "commit": sha, "commit_dirty": dirty, "notes": {},
+            "semgrep_partial_is_gap": bool(config.get("semgrep_partial_is_gap", False))}})
 
     shim = _python_shim() if "snyk" in tools else None
     sonar = None
@@ -337,20 +501,37 @@ def scan(config, base, out_dir, version="", tools=TOOLS):
                     pr["out"]["notes"]["SonarQube"] = "docker not on PATH"
             else:
                 sonar = Sonar(logs)
+                errors = (SonarError, OSError, ValueError, KeyError)
+
+                def fail(pr, exc):
+                    warn(f"SonarQube {pr['name']}: {exc}")
+                    pr["out"]["sonarqube"] = {}
+                    pr["out"]["notes"]["SonarQube"] = str(exc)
                 try:
                     sonar.up()
+                except errors as exc:  # the server itself is down: every project is affected
+                    for pr in projects:
+                        fail(pr, exc)
+                else:
+                    # One project's problem (say, a refused sonar-project.properties) is
+                    # that project's gap, not everyone's.
+                    scanned = []
                     for pr in projects:
                         key = pr["cfg"].get("sonar_project_key") or pr["name"]
-                        sonar.scan(pr["path"], key, os.path.join(logs, f"{pr['name']}.sonar.log"))
-                    for pr in projects:
+                        try:
+                            sonar.scan(pr["path"], key,
+                                       os.path.join(logs, f"{pr['name']}.sonar.log"),
+                                       pr["cfg"].get("sonar_args") or ())
+                            scanned.append(pr)
+                        except errors as exc:
+                            fail(pr, exc)
+                    for pr in scanned:
                         key = pr["cfg"].get("sonar_project_key") or pr["name"]
-                        sonar.wait(key)
-                        pr["out"]["sonarqube"] = sonar.export(key, raw)
-                except (SonarError, OSError, ValueError, KeyError) as exc:
-                    warn(f"SonarQube: {exc}")
-                    for pr in projects:
-                        pr["out"].setdefault("sonarqube", {})
-                        pr["out"]["notes"]["SonarQube"] = str(exc)
+                        try:
+                            sonar.wait(key)
+                            pr["out"]["sonarqube"] = sonar.export(key, raw)
+                        except errors as exc:
+                            fail(pr, exc)
         for pr in projects:
             _scan_project(pr, raw, logs, tools, settings)
     finally:
@@ -369,6 +550,9 @@ def _scan_project(pr, raw, logs, tools, settings):
     cfg, path, name, out = pr["cfg"], pr["path"], pr["name"], pr["out"]
     notes = out["notes"]
     stem = os.path.join(raw, name)
+    # Tools left out of --tools still appear in `sources` as optional skips, so a
+    # screenshot cannot look like "only these scanners exist".
+    _register_skipped(out, notes, tools, cfg, stem)
 
     def lg(tool):
         return os.path.join(logs, f"{name}.{tool}.log")
@@ -437,7 +621,7 @@ def _scan_project(pr, raw, logs, tools, settings):
         if not have("semgrep"):
             notes["Semgrep"] = "semgrep not on PATH"
         else:
-            _semgrep(cfg, path, out["semgrep"], lg("semgrep"), notes)
+            _semgrep(cfg, path, out["semgrep"], lg("semgrep"), notes, settings["semgrep_mode"])
 
     if "dependabot" in tools:
         out["dependabot"] = f"{stem}-dependabot.json"
@@ -447,41 +631,51 @@ def _scan_project(pr, raw, logs, tools, settings):
             notes["Dependabot"] = "gh not on PATH"
         else:
             log(f"Dependabot: {cfg['repo']}")
+            # Open findings plus waived ones (dismissed, auto-dismissed). `fixed` alerts are
+            # left out on purpose: they are the whole history and are not waivers.
             with open(out["dependabot"], "w") as fh, open(lg("dependabot"), "w") as err:
-                rc = subprocess.run(
-                    ["gh", "api", f"/repos/{cfg['repo']}/dependabot/alerts?state=open&per_page=100",
-                     "--paginate"], stdout=fh, stderr=err).returncode
+                rc = subprocess.run(_dependabot_cmd(cfg["repo"]), stdout=fh, stderr=err).returncode
             if rc != 0:
-                notes["Dependabot"] = "gh api failed, see logs"
+                notes["Dependabot"] = f"gh api exited {rc}, see logs"
                 _rm(out["dependabot"])
 
     if "osv" in tools:
         out["osv"] = {"path": f"{stem}-osv.json"}
-        _osv(cfg, path, out["osv"], lg("osv"), notes)
+        _osv(cfg, path, out["osv"], lg("osv"), notes, settings)
 
     if "zizmor" in tools:
         out["zizmor"] = {"path": f"{stem}-zizmor.json"}
-        _zizmor(path, out["zizmor"], lg("zizmor"), notes)
+        _zizmor(path, out["zizmor"], lg("zizmor"), notes, settings)
 
     if "clamav" in tools:
         out["clamav"] = f"{stem}-clamav.txt"
-        _clamav(path, out["clamav"], lg("clamav"), notes)
+        _clamav(path, out["clamav"], lg("clamav"), notes, settings)
 
     if "gitleaks" in tools:
         out["gitleaks"] = f"{stem}-gitleaks.json"
-        _gitleaks(cfg, path, out["gitleaks"], lg("gitleaks"), notes)
+        _gitleaks(cfg, path, out["gitleaks"], lg("gitleaks"), notes, settings)
 
-    if "guarddog" in tools and cfg.get("guarddog"):
-        out["guarddog"] = {}
-        for i, g in enumerate(cfg["guarddog"]):
-            label = g["manifest"]
-            dest = f"{stem}-guarddog-{i}.json"
-            out["guarddog"][label] = {"path": dest, "ecosystem": g["ecosystem"],
-                                      "manifest": g["manifest"]}
-            _guarddog(g, path, dest, lg(f"guarddog-{i}"), notes, f"GuardDog {label}")
+    if "guarddog" in tools:
+        if cfg.get("guarddog"):
+            out["guarddog"] = {}
+            for i, g in enumerate(cfg["guarddog"]):
+                label = g["manifest"]
+                dest = f"{stem}-guarddog-{i}.json"
+                out["guarddog"][label] = {"path": dest, "ecosystem": g["ecosystem"],
+                                          "manifest": g["manifest"]}
+                _guarddog(g, path, dest, lg(f"guarddog-{i}"), notes, f"GuardDog {label}")
+        else:
+            # Still list the source so a missing GuardDog config is not invisible.
+            out["guarddog"] = {"(not configured)": {
+                "path": f"{stem}-guarddog.json", "ecosystem": "", "manifest": "(not configured)"}}
+            notes["GuardDog (not configured)"] = "not configured: no `guarddog` list in this project"
+            out.setdefault("skipped", []).append("GuardDog (not configured)")
 
     if cfg.get("coverage"):
-        out["coverage"] = _inside(path, cfg["coverage"])
+        # Relative: a file inside the checkout. Absolute: a file produced elsewhere
+        # (a CI artifact, a summary rebuilt from a PR comment); it is only parsed.
+        out["coverage"] = (cfg["coverage"] if os.path.isabs(cfg["coverage"])
+                           else _inside(path, cfg["coverage"]))
 
 
 def _trivy(args, out, logfile, notes, source):
@@ -492,14 +686,30 @@ def _trivy(args, out, logfile, notes, source):
         _rm(out)
 
 
-def _semgrep(cfg, path, out, logfile, notes):
+def _semgrep_label(mode):
+    has_token = bool(os.environ.get("SEMGREP_APP_TOKEN"))
+    if mode == "public" or (mode == "auto" and not has_token):
+        return "public ruleset"
+    return "org policy (semgrep ci)" if has_token else "not scanned: SEMGREP_APP_TOKEN not set"
+
+
+def _semgrep(cfg, path, out, logfile, notes, mode="auto"):
     env = {k: v for k, v in os.environ.items() if k not in _DIFF_AWARE_ENV}
+    if mode == "public":
+        env.pop("SEMGREP_APP_TOKEN", None)
+    if mode == "ci" and not env.get("SEMGREP_APP_TOKEN"):
+        # A trend must not silently switch rulesets under one "Semgrep" label.
+        notes["Semgrep"] = "SEMGREP_APP_TOKEN not set (semgrep_mode is ci)"
+        return
     if env.get("SEMGREP_APP_TOKEN"):
         # `semgrep ci` applies your organisation's policy (Code + Supply Chain).
         if cfg.get("repo"):
+            sha, _ = git_sha(path)
             env.update(SEMGREP_REPO_NAME=cfg["repo"],
                        SEMGREP_REPO_URL=f"https://github.com/{cfg['repo']}",
-                       SEMGREP_COMMIT=git_sha(path))
+                       SEMGREP_COMMIT=sha)
+        if cfg.get("semgrep_branch"):
+            env["SEMGREP_BRANCH"] = str(cfg["semgrep_branch"])
         cmd = ["semgrep", "ci", "--code", "--supply-chain", "--json",
                f"--json-output={out}", "--metrics=off"]
     else:
@@ -512,21 +722,97 @@ def _semgrep(cfg, path, out, logfile, notes):
         _rm(out)
 
 
-def _clamav(path, out, logfile, notes):
+DEPENDABOT_STATES = "open,dismissed,auto_dismissed"
+
+
+def _dependabot_cmd(repo):
+    # GitHub silently ignores an unknown `state` and returns no alerts (not an error), so
+    # the exact string is pinned by a test.
+    return ["gh", "api", f"/repos/{repo}/dependabot/alerts?state={DEPENDABOT_STATES}&per_page=100",
+            "--paginate"]
+
+
+def _register_skipped(out, notes, tools, cfg, stem):
+    """Stub every disabled tool so digest still lists it (optional, not collected)."""
+    skip = "skipped: not in --tools"
+    out.setdefault("skipped", [])
+
+    def mark(source, note=skip):
+        """Optional is recorded structurally: a note's wording never makes a gap optional."""
+        notes.setdefault(source, note)
+        if source not in out["skipped"]:
+            out["skipped"].append(source)
+    if "sonarqube" not in tools:
+        out.setdefault("sonarqube", {})
+        mark("SonarQube")
+    if "snyk" not in tools:
+        products = {"Open Source": f"{stem}-snyk-oss.json", "Code": f"{stem}-snyk-code.json",
+                    "IaC": f"{stem}-snyk-iac.json"}
+        if cfg.get("image"):
+            products["Container"] = f"{stem}-snyk-container.json"
+        out["snyk"] = products
+        for p in products:
+            mark(f"Snyk {p}")
+    if "trivy" not in tools:
+        out["trivy"] = {"Config": f"{stem}-trivy-config.json"}
+        if cfg.get("helm"):
+            out["trivy"]["Chart"] = f"{stem}-trivy-chart.json"
+        for t in out["trivy"]:
+            mark(f"Trivy {t}")
+    if "semgrep" not in tools:
+        out["semgrep"] = f"{stem}-semgrep.json"
+        mark("Semgrep")
+    if "dependabot" not in tools:
+        out["dependabot"] = f"{stem}-dependabot.json"
+        mark("Dependabot")
+    if "osv" not in tools:
+        out["osv"] = {"path": f"{stem}-osv.json"}
+        mark("OSV-Scanner")
+    if "zizmor" not in tools:
+        out["zizmor"] = {"path": f"{stem}-zizmor.json"}
+        mark("zizmor")
+    if "clamav" not in tools:
+        out["clamav"] = f"{stem}-clamav.txt"
+        mark("ClamAV")
+    if "gitleaks" not in tools:
+        out["gitleaks"] = f"{stem}-gitleaks.json"
+        mark("Gitleaks")
+    if "guarddog" not in tools:
+        if cfg.get("guarddog"):
+            out["guarddog"] = {}
+            for i, g in enumerate(cfg["guarddog"]):
+                label = g["manifest"]
+                out["guarddog"][label] = {"path": f"{stem}-guarddog-{i}.json",
+                                          "ecosystem": g["ecosystem"], "manifest": label}
+                mark(f"GuardDog {label}")
+        else:
+            out["guarddog"] = {"(not configured)": {
+                "path": f"{stem}-guarddog.json", "ecosystem": "", "manifest": "(not configured)"}}
+            mark("GuardDog (not configured)")
+
+
+def _clamav(path, out, logfile, notes, settings=None):
     """Native clamscan when it has a database; otherwise the official image,
     which refreshes its signatures in the same container before scanning."""
     native = have("clamscan") and _clamav_db_ready()
     if native:
-        cmd, cwd = ["clamscan", "-r", "--infected", "--no-summary", "--stdout", "."], path
+        cmd, cwd = ["clamscan", "-r", "--infected", "--stdout", "."], path
+        runner = "native"
     elif have("docker"):
+        # freshclam failure must not silently look like a clean scan: the marker
+        # line is what the parser turns into an incomplete source.
         cmd = ["docker", "run", "--rm", "--platform", "linux/amd64", "--entrypoint", "sh",
                "-v", f"{path}:/scan:ro", CLAMAV_IMAGE, "-c",
-               "freshclam --quiet >/dev/null 2>&1; cd /scan && "
-               "clamscan -r --infected --no-summary --stdout ."]
+               "if ! freshclam --quiet >/dev/null 2>&1; then "
+               "echo '# qsd: freshclam failed'; fi; "
+               "cd /scan && clamscan -r --infected --stdout ."]
         cwd = None
+        runner = "container"
     else:
         notes["ClamAV"] = "neither clamscan (with a database) nor docker available"
         return
+    if settings is not None:
+        settings.setdefault("runners", {})["clamav"] = runner
     log("ClamAV: " + ("clamscan" if native else "clamav/clamav container"))
     with open(out, "w", encoding="utf-8") as fh, open(logfile, "w") as err:
         fh.write(f"# qsd clamav {'native' if native else CLAMAV_IMAGE}\n")
@@ -564,7 +850,7 @@ def _guarddog(g, path, out, logfile, notes, source):
         _rm(out)
 
 
-def _gitleaks(cfg, path, out, logfile, notes):
+def _gitleaks(cfg, path, out, logfile, notes, settings=None):
     """Full git history when the checkout is a repository, the files otherwise.
 
     The free MIT CLI needs no licence key (only gitleaks-action does, for
@@ -582,7 +868,7 @@ def _gitleaks(cfg, path, out, logfile, notes):
     if mode == "git" and cfg.get("gitleaks_log_opts"):
         args.append(f"--log-opts={cfg['gitleaks_log_opts']}")
     if have("gitleaks"):
-        cmd, target = ["gitleaks", mode, path, "--report-path", out, *args], None
+        cmd, target, runner = ["gitleaks", mode, path, "--report-path", out, *args], None, "native"
         log(f"Gitleaks: {mode} (native)")
     elif have("docker"):
         # The report goes to stdout so the container never writes to the host.
@@ -590,11 +876,13 @@ def _gitleaks(cfg, path, out, logfile, notes):
                "-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=safe.directory",
                "-e", "GIT_CONFIG_VALUE_0=*", "-v", f"{path}:/repo:ro", GITLEAKS_IMAGE,
                mode, "/repo", "--report-path", "/dev/stdout", *args]
-        target = out
+        target, runner = out, "container"
         log(f"Gitleaks: {mode} (container)")
     else:
         notes["Gitleaks"] = "neither gitleaks nor docker available"
         return
+    if settings is not None:
+        settings.setdefault("runners", {})["gitleaks"] = runner
     if target:
         with open(target, "w") as fh, open(logfile, "w") as err:
             rc = subprocess.run(cmd, stdout=fh, stderr=err).returncode
@@ -606,14 +894,15 @@ def _gitleaks(cfg, path, out, logfile, notes):
 
 
 def _native_or_container(tool, image, path, args, target_args):
-    """(cmd, root): the native CLI on `path`, else the pinned image with the
+    """(cmd, root, runner): the native CLI on `path`, else the pinned image with the
     checkout mounted read-only. Output always goes to stdout."""
     if have(tool):
-        return [tool, *args, *target_args(path)], path
+        return [tool, *args, *target_args(path)], path, "native"
     if have("docker"):
         return (["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
-                 "-v", f"{path}:/src:ro", image, *args, *target_args("/src")], "/src")
-    return None, None
+                 "-v", f"{path}:/src:ro", image, *args, *target_args("/src")], "/src",
+                "container")
+    return None, None, None
 
 
 def _capture(cmd, out, logfile):
@@ -629,7 +918,7 @@ def _log_has(logfile, text):
         return False
 
 
-def _osv(cfg, path, spec, logfile, notes):
+def _osv(cfg, path, spec, logfile, notes, settings=None):
     """Queries osv.dev with package names and versions (not code). Set
     `osv_offline` to use downloaded databases instead (native CLI only)."""
     args = ["scan", "source", "-r", "--format", "json"]
@@ -638,10 +927,12 @@ def _osv(cfg, path, spec, logfile, notes):
             notes["OSV-Scanner"] = "osv_offline needs the native osv-scanner"
             return
         args += ["--offline-vulnerabilities", "--download-offline-databases"]
-    cmd, root = _native_or_container("osv-scanner", OSV_IMAGE, path, args, lambda t: [t])
+    cmd, root, runner = _native_or_container("osv-scanner", OSV_IMAGE, path, args, lambda t: [t])
     if not cmd:
         notes["OSV-Scanner"] = "neither osv-scanner nor docker available"
         return
+    if settings is not None:
+        settings.setdefault("runners", {})["osv"] = runner
     log(f"OSV-Scanner: {cfg['name']}")
     spec["root"] = root
     rc = _capture(cmd, spec["path"], logfile)
@@ -653,14 +944,16 @@ def _osv(cfg, path, spec, logfile, notes):
     _rm(spec["path"])
 
 
-def _zizmor(path, spec, logfile, notes):
+def _zizmor(path, spec, logfile, notes, settings=None):
     """Offline audits only: no GitHub token, nothing leaves the machine. With
     --no-exit-codes a run that finds problems exits 0, so nonzero is a failure."""
     args = ["--offline", "--no-exit-codes", "--format", "json"]
-    cmd, root = _native_or_container("zizmor", ZIZMOR_IMAGE, path, args, lambda t: [t])
+    cmd, root, runner = _native_or_container("zizmor", ZIZMOR_IMAGE, path, args, lambda t: [t])
     if not cmd:
         notes["zizmor"] = "neither zizmor nor docker available"
         return
+    if settings is not None:
+        settings.setdefault("runners", {})["zizmor"] = runner
     log("zizmor: GitHub Actions workflows")
     spec["root"] = root
     rc = _capture(cmd, spec["path"], logfile)

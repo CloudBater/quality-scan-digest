@@ -14,7 +14,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "1.0"
+      "const": "1.1"
     },
     "generator": {
       "type": "object",
@@ -52,7 +52,10 @@
         "required": [
           "collected",
           "complete",
-          "note"
+          "note",
+          "suppressed",
+          "optional",
+          "partial"
         ],
         "properties": {
           "collected": {
@@ -64,6 +67,20 @@
           },
           "note": {
             "type": "string"
+          },
+          "suppressed": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Waived / ignored / dismissed findings not listed as open"
+          },
+          "optional": {
+            "type": "boolean",
+            "description": "True when skipped via --tools; does not fail --strict"
+          },
+          "partial": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Files or items the tool could only partly scan. The source can still be complete; a value above 0 means this is a PARTIAL SCAN of those files, not a full one (e.g. Semgrep files it could only partly parse)."
           }
         }
       }
@@ -110,13 +127,7 @@
     },
     "settings": {
       "type": "object",
-      "description": "Severity floors, rulesets and dedup passes the scan ran with",
-      "additionalProperties": {
-        "type": [
-          "string",
-          "null"
-        ]
-      }
+      "description": "Severity floors, rulesets, digests and runners the scan ran with"
     }
   },
   "$defs": {
@@ -146,7 +157,9 @@
         "commit",
         "findings",
         "security",
-        "sec_crit_high"
+        "sec_crit_high",
+        "sec_unrated",
+        "malware"
       ],
       "properties": {
         "project": {
@@ -157,6 +170,13 @@
         },
         "commit": {
           "type": "string"
+        },
+        "commit_dirty": {
+          "description": "true/false when known; null when git status could not be read",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "sonar": {
           "type": "object",
@@ -205,6 +225,12 @@
         "sec_crit_high": {
           "type": "integer"
         },
+        "sec_unrated": {
+          "type": "integer"
+        },
+        "malware": {
+          "type": "integer"
+        },
         "by_source": {
           "type": "object",
           "additionalProperties": {
@@ -229,6 +255,7 @@
       "type": "object",
       "required": [
         "id",
+        "track",
         "project_id",
         "proj",
         "src",
@@ -239,6 +266,7 @@
         "msg",
         "loc",
         "line",
+        "col",
         "ref",
         "fix",
         "ids",
@@ -249,7 +277,11 @@
       "properties": {
         "id": {
           "type": "string",
-          "description": "Content hash of project, source, kind, rule, location, line and message; unique within a report"
+          "description": "Display content hash including message; unique within a report"
+        },
+        "track": {
+          "type": "string",
+          "description": "Stable tracking key without message; use for trend diffs"
         },
         "proj": {
           "type": "string"
@@ -299,6 +331,13 @@
             "string"
           ]
         },
+        "col": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "description": "Column / startOffset; two issues on one line stay distinct"
+        },
         "ref": {
           "type": "string",
           "description": "The tool's own rule or advisory id"
@@ -346,6 +385,12 @@
                 "type": "string"
               },
               "line": {
+                "type": [
+                  "integer",
+                  "string"
+                ]
+              },
+              "col": {
                 "type": [
                   "integer",
                   "string"

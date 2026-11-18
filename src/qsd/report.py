@@ -5,11 +5,12 @@ schema/report.schema.json for the shape.
 """
 
 import datetime as _dt
+import hashlib
 import os
 
 from . import __version__
 from .dedup import DEFAULT_PASSES, dedup
-from .model import fingerprint, is_security, rank, safe_name
+from .model import fingerprint, is_malware, is_security, rank, safe_name, track_key
 from .parsers import clamav as p_clamav
 from .parsers import coverage as p_coverage
 from .parsers import dependabot as p_dependabot
@@ -22,7 +23,15 @@ from .parsers import sonarqube as p_sonar
 from .parsers import trivy as p_trivy
 from .parsers import zizmor as p_zizmor
 
-SCHEMA_VERSION = "1.0"
+# Bump when the payload shape or enum set changes. Consumers pin on this, not the
+# package version: v0.3.0 already grew under schema 1.0 without a signal.
+SCHEMA_VERSION = "1.1"
+
+
+# Keys of a project in a manifest that name a source. A project with none, or a misspelled
+# product under `snyk`, used to contribute nothing and read as clean.
+SOURCE_KEYS = ("sonarqube", "snyk", "trivy", "semgrep", "dependabot", "osv", "zizmor",
+               "gitleaks", "clamav", "guarddog", "coverage")
 
 
 class ManifestError(ValueError):
@@ -53,8 +62,44 @@ def validate(manifest):
         names.add(name)
         labels.add(label)
         p["name"], p["label"] = name, label
+        for k in SOURCE_KEYS:
+            if k in p and not p[k]:
+                # The runner writes `sonarqube: {}` for a SonarQube it could not run, and
+                # always with a note; nothing else may be declared empty.
+                if k == "sonarqube" and "SonarQube" in (p.get("notes") or {}):
+                    continue
+                raise ManifestError(f"project {name!r}: `{k}` is declared but empty; an empty "
+                                    f"source would report zero findings as if it were clean")
+        if not any(p.get(k) for k in SOURCE_KEYS):
+            raise ManifestError(f"project {name!r} lists no sources ({', '.join(SOURCE_KEYS)}); "
+                                f"it would report zero findings as if it were clean")
+        unknown = sorted(set(p.get("snyk") or {}) - set(p_snyk.PRODUCTS))
+        if unknown:
+            raise ManifestError(f"project {name!r}: unknown snyk product(s) {unknown}; "
+                                f"expected {list(p_snyk.PRODUCTS)}")
+        # Sources deliberately not run (--tools, or a tool with nothing configured).
+        # Only this list makes a source optional; a note's wording never does.
+        skipped = p.get("skipped")
+        p["skipped"] = [str(x) for x in skipped] if isinstance(skipped, list) else []
         for k in ("repo", "commit"):
             p[k] = _s(p.get(k))
+        # None = unknown (git status failed); do not coerce that into "clean".
+        # Only real booleans (or 0/1 ints) count — the string "false" must not become True.
+        dirty = p.get("commit_dirty")
+        if dirty is None or isinstance(dirty, bool):
+            p["commit_dirty"] = dirty
+        elif dirty in (0, 1):
+            p["commit_dirty"] = bool(dirty)
+        elif isinstance(dirty, str) and dirty.strip().lower() in ("true", "false"):
+            p["commit_dirty"] = dirty.strip().lower() == "true"
+        else:
+            p["commit_dirty"] = None
+    # `semgrep_partial_is_gap` is per project; settings (which the HTML subtitle prints)
+    # supplies the default, so the page can never say `true` while the scan treats it as false.
+    top = (manifest.get("settings") or {}).get("semgrep_partial_is_gap")
+    if isinstance(top, bool):
+        for p in projects:
+            p.setdefault("semgrep_partial_is_gap", top)
     manifest["title"] = _s(manifest.get("title"))
     manifest["version"] = _s(manifest.get("version"))
     return manifest
@@ -72,16 +117,34 @@ def collect_project(cfg, sonar_token=""):
     """
     pid, label = cfg["name"], cfg["label"]
     run_notes = cfg.get("notes") or {}
+    skipped = set(cfg.get("skipped") or [])
     rows, sources, measures, deps, dbot = [], {}, {}, None, None
 
-    def record(source, st):
-        sources[f"{label}: {source}"] = {"collected": bool(st["ok"]),
-                                         "complete": bool(st["ok"]) and st.get(
-                                             "complete", not st["note"]),
-                                         "note": st["note"]}
+    def record(source, st, optional=False):
+        note = st["note"]
+        # `optional` is decided by the caller and only for a source that was never
+        # attempted (see `missing`): a parse failure, an error file or a failed fetch is
+        # never optional, even if a hand-written manifest lists the source under `skipped`.
+        opt = optional or bool(st.get("optional"))
+        # Sources of one project carry distinct prefixes (Trivy ..., Snyk ..., GuardDog ...),
+        # so they cannot collide; sources of different projects can, and build_payload
+        # refuses that.
+        sources[f"{label}: {source}"] = {
+            "collected": bool(st["ok"]),
+            "complete": bool(st["ok"]) and st.get("complete", not st["note"]),
+            "note": note,
+            "suppressed": int(st.get("suppressed") or 0),
+            # Files/items the tool could only partly scan. The source can still be
+            # `complete`; this is what makes a partial scan visible as one.
+            "partial": int(st.get("partial") or 0),
+            "optional": opt,
+        }
 
     def missing(source, default="not scanned"):
-        record(source, {"ok": False, "note": run_notes.get(source, default)})
+        # Nothing was supplied for this source: either it was deliberately not run
+        # (listed in `skipped`, optional) or it is simply missing (a gap).
+        record(source, {"ok": False, "note": run_notes.get(source, default)},
+               optional=source in skipped)
 
     def file_source(source, path, parse):
         nonlocal rows
@@ -94,16 +157,16 @@ def collect_project(cfg, sonar_token=""):
         return st
 
     sq = cfg.get("sonarqube")
-    if sq is not None:
+    if sq is not None and not (sq.get("host") or sq.get("issues")):
+        missing("SonarQube")  # nothing supplied: skipped on purpose, or a gap with its note
+    elif sq is not None:
         try:
             if sq.get("host"):
                 if not sonar_token:
                     raise p_sonar.SonarError("no token (set SONAR_TOKEN)")
                 doc = p_sonar.fetch(sq["host"], sonar_token, sq.get("project_key") or pid)
-            elif sq.get("issues"):
-                doc = p_sonar.load_files(sq)
             else:
-                raise p_sonar.SonarError(run_notes.get("SonarQube", "not scanned"))
+                doc = p_sonar.load_files(sq)
             r, st, measures = p_sonar.to_rows(doc, label, pid)
             rows += r
             record("SonarQube", st)
@@ -125,7 +188,11 @@ def collect_project(cfg, sonar_token=""):
         file_source(f"Trivy {scan}", path, lambda p: p_trivy.load(p, label, pid))
 
     if "semgrep" in cfg:
-        file_source("Semgrep", cfg["semgrep"], lambda p: p_semgrep.load(p, label, pid))
+        # Default False: partly parsed files are a loudly marked PARTIAL SCAN, not a gap
+        # (see parsers/semgrep.py for why). A project can opt in to treating them as one.
+        file_source("Semgrep", cfg["semgrep"],
+                    lambda p, g=bool(cfg.get("semgrep_partial_is_gap")): p_semgrep.load(
+                        p, label, pid, g))
 
     if "dependabot" in cfg:
         st = file_source("Dependabot", cfg["dependabot"],
@@ -159,8 +226,40 @@ def collect_project(cfg, sonar_token=""):
             record("Coverage", {"ok": cov is not None, "note": note})
 
     summary = {"project_id": pid, "project": label, "repo": cfg["repo"], "commit": cfg["commit"],
+               "commit_dirty": cfg.get("commit_dirty"),
                "sonar": measures, "coverage": cov, "dependabot": dbot, "deps": deps}
     return rows, summary, sources
+
+
+def _assign_tracks(rows):
+    """Give every row a `track` that is unique within the report.
+
+    Two distinct findings must never share a key, because a consumer that keys on it
+    would merge them. The key is location and identity without the free-text message,
+    so it survives a scanner rewording its title; only rows whose key collides (same
+    rule, file and line, different message, e.g. two Trivy secrets on one line) are
+    told apart by a hash of the message. Rows still identical after that can only
+    exist with dedup off, and get an ordinal suffix. Stability is therefore best
+    effort for colliding rows: if a sibling drops out, the survivor's track reverts.
+    """
+    groups = {}
+    for r in rows:
+        r["track"] = track_key(r)
+        groups.setdefault(r["track"], []).append(r)
+    for group in groups.values():
+        if len(group) == 1:
+            continue
+        for r in group:
+            r["track"] = hashlib.sha256(
+                f"{r['track']}\x1f{r.get('msg', '')}".encode("utf-8")).hexdigest()[:16]
+    seen = {}
+    for r in rows:
+        n = seen.get(r["track"], 0)
+        seen[r["track"]] = n + 1
+        if n:
+            r["track"] = f"{r['track']}-{n + 1}"
+    for r in rows:
+        r.pop("_track", None)
 
 
 def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES):
@@ -171,20 +270,28 @@ def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES):
         r, s, src = collect_project(cfg, sonar_token)
         raw += r
         summaries.append(s)
+        for key in src:
+            if key in sources:
+                raise ManifestError(f"two sources are both called {key!r}; rename a project "
+                                    f"label or a scan name so one cannot overwrite the other")
         sources.update(src)
 
     rows, stats = dedup(raw, passes or ())
-    seen = {}
+    _assign_tracks(rows)
+    seen_id = {}
     for r in rows:
         r.pop("_package", None)
         r.pop("_eco", None)
+        r.pop("_track", None)
         r["rank"] = rank(r["sev"])
+
         fid = fingerprint(r)
-        n = seen.get(fid, 0)
-        seen[fid] = n + 1
+        n = seen_id.get(fid, 0)
+        seen_id[fid] = n + 1
         # Identical content twice (exact pass off) still gets two distinct ids.
         r["id"] = fid if n == 0 else f"{fid}-{n + 1}"
-    rows.sort(key=lambda r: (r["rank"], r["proj"], r["src"], r["loc"], str(r["line"])))
+    rows.sort(key=lambda r: (r["rank"], r["proj"], r["src"], r["loc"], str(r["line"]),
+                             str(r.get("col", ""))))
 
     for s in summaries:
         mine = [r for r in rows if r["project_id"] == s["project_id"]]
@@ -197,6 +304,9 @@ def build_payload(manifest, sonar_token="", passes=DEFAULT_PASSES):
             "findings": len(mine),
             "security": len(sec),
             "sec_crit_high": sum(1 for r in sec if r["rank"] <= 1),
+            # Unrated security (sev "—", rank 5) is invisible from the crit/high gate.
+            "sec_unrated": sum(1 for r in sec if r["rank"] >= 5),
+            "malware": sum(1 for r in mine if is_malware(r)),
             # Sightings per scanner: a merged row counts under each, so these do not sum.
             "by_source": by_source,
             # Kept for consumers of the original payload shape.

@@ -31,4 +31,4 @@ version = { attr = "qsd.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-qsd = ["data/*.yml"]
+qsd = ["data/*.yml", "data/report.schema.json"]

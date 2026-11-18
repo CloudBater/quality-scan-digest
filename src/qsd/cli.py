@@ -32,6 +32,17 @@ def _write(payload, json_out, html_out):
         if not v["complete"]:
             state = "incomplete" if v["collected"] else "not collected"
             print(f"  {state}: {name} - {v['note']}", file=sys.stderr)
+        elif v.get("note"):
+            print(f"  note: {name} - {v['note']}", file=sys.stderr)
+    partial = [(n, v) for n, v in src.items() if v.get("partial") and v["collected"]]
+    if partial:
+        # The source counts as complete (strict passes), but this is NOT a full scan of
+        # those files, and a reader must not walk away thinking it was.
+        print("", file=sys.stderr)
+        print(f"!! PARTIAL SCAN: {len(partial)} source(s) could only partly scan some files, so a "
+              f"missing finding there is weaker evidence than elsewhere:", file=sys.stderr)
+        for n, v in partial:
+            print(f"!!   {n}: {v['partial']} file(s) only partly scanned", file=sys.stderr)
     return collected, complete, len(src)
 
 
@@ -48,8 +59,12 @@ def _passes(arg):
 def _common(p):
     p.add_argument("--dedup", type=_passes, default=DEFAULT_PASSES,
                    help="comma list of passes: exact,advisory (default), sast (opt-in), or 'none'")
-    p.add_argument("--strict", action="store_true",
-                   help="exit 2 unless every listed source was collected completely")
+    # Strict is the default: a release console that screenshots zero under a gap is worse
+    # than a failing exit. --lenient is for local exploration of partial runs.
+    p.add_argument("--strict", action=argparse.BooleanOptionalAction, default=None,
+                   help="exit 2 unless every required source was collected completely (default)")
+    p.add_argument("--lenient", action="store_true",
+                   help="alias for --no-strict: allow incomplete sources")
 
 
 def main(argv=None):
@@ -74,6 +89,12 @@ def main(argv=None):
     _common(d)
 
     a = ap.parse_args(argv)
+    if a.lenient and a.strict:
+        ap.error("--strict and --lenient contradict each other")
+    if a.lenient:
+        a.strict = False
+    elif a.strict is None:
+        a.strict = True
     token = os.environ.get("SONAR_TOKEN", "")
 
     try:
@@ -110,10 +131,16 @@ def main(argv=None):
     collected, complete, total = counts
     if collected == 0:
         sys.exit("error: no sources collected - this report would be misleading")
-    if a.strict and complete < total:
-        print(f"error: --strict: {total - complete} source(s) not collected completely",
-              file=sys.stderr)
-        sys.exit(2)
+    if a.strict:
+        # Optional sources (skipped via --tools) do not fail the gate.
+        required = [(n, v) for n, v in payload["sources"].items() if not v.get("optional")]
+        gaps = [(n, v) for n, v in required if not v["complete"]]
+        if gaps:
+            print(f"error: --strict: {len(gaps)} required source(s) not collected completely",
+                  file=sys.stderr)
+            for n, v in gaps:
+                print(f"  {n} - {v['note']}", file=sys.stderr)
+            sys.exit(2)
 
 
 def _resolve(manifest, base):

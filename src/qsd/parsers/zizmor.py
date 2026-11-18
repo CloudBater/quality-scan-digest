@@ -24,9 +24,10 @@ def load(path, label, project_id=None, root=""):
     if not isinstance(doc, list) or not all(isinstance(f, dict) and "ident" in f for f in doc):
         return failed("not recognisable zizmor JSON output")
 
-    rows = []
+    rows, suppressed = [], 0
     for f in doc:
         if f.get("ignored"):
+            suppressed += 1  # waived inline or in zizmor.yml; counted, not listed as open
             continue
         det = f.get("determinations") or {}
         loc = _primary(f)
@@ -43,6 +44,7 @@ def load(path, label, project_id=None, root=""):
             msg=f"{f.get('desc', '')}{': ' + note if note else ''}"
                 f" (confidence {str(det.get('confidence', '?')).lower()})",
             loc=rel(file_, root), line=row + 1 if isinstance(row, int) else "",
+            col=start.get("column"),
             ref=f["ident"], fix=f.get("url", ""),
         ))
-    return rows, status()
+    return rows, status(suppressed=suppressed)

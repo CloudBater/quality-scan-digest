@@ -1,0 +1,423 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "quality-scan-digest report",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "title",
+    "version",
+    "settings",
+    "generated_from",
+    "sources",
+    "dedup",
+    "findings"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.1"
+    },
+    "generator": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "title": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string",
+      "description": "Release label of the scanned code"
+    },
+    "generated_from": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/project"
+      }
+    },
+    "sources": {
+      "type": "object",
+      "description": "Keyed \"<project label>: <source>\"",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "collected",
+          "complete",
+          "note",
+          "suppressed",
+          "optional",
+          "partial"
+        ],
+        "properties": {
+          "collected": {
+            "type": "boolean"
+          },
+          "complete": {
+            "type": "boolean",
+            "description": "collected and nothing reported missing"
+          },
+          "note": {
+            "type": "string"
+          },
+          "suppressed": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Waived / ignored / dismissed findings not listed as open"
+          },
+          "optional": {
+            "type": "boolean",
+            "description": "True when skipped via --tools; does not fail --strict"
+          },
+          "partial": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Files or items the tool could only partly scan. The source can still be complete; a value above 0 means this is a PARTIAL SCAN of those files, not a full one (e.g. Semgrep files it could only partly parse)."
+          }
+        }
+      }
+    },
+    "dedup": {
+      "type": "object",
+      "required": [
+        "input",
+        "output"
+      ],
+      "properties": {
+        "input": {
+          "type": "integer"
+        },
+        "output": {
+          "type": "integer"
+        },
+        "exact": {
+          "type": "integer"
+        },
+        "advisory": {
+          "type": "integer"
+        },
+        "sast": {
+          "type": "integer"
+        },
+        "passes": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "exact",
+              "advisory",
+              "sast"
+            ]
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "settings": {
+      "type": "object",
+      "description": "Severity floors, rulesets, digests and runners the scan ran with"
+    }
+  },
+  "$defs": {
+    "coverage": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "pct": {
+          "type": "number"
+        },
+        "covered": {
+          "type": "integer"
+        },
+        "measured": {
+          "type": "integer"
+        }
+      }
+    },
+    "project": {
+      "type": "object",
+      "required": [
+        "project_id",
+        "project",
+        "repo",
+        "commit",
+        "findings",
+        "security",
+        "sec_crit_high",
+        "sec_unrated",
+        "malware"
+      ],
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "commit": {
+          "type": "string"
+        },
+        "commit_dirty": {
+          "description": "true/false when known; null when git status could not be read",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "sonar": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "coverage": {
+          "$ref": "#/$defs/coverage"
+        },
+        "dependabot": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "total": {
+              "type": "integer"
+            },
+            "unique": {
+              "type": "integer"
+            },
+            "by_sev": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        "deps": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "findings": {
+          "type": "integer"
+        },
+        "security": {
+          "type": "integer"
+        },
+        "sec_crit_high": {
+          "type": "integer"
+        },
+        "sec_unrated": {
+          "type": "integer"
+        },
+        "malware": {
+          "type": "integer"
+        },
+        "by_source": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        },
+        "snyk": {
+          "type": "integer"
+        },
+        "semgrep": {
+          "type": "integer"
+        },
+        "trivy": {
+          "type": "integer"
+        },
+        "project_id": {
+          "type": "string"
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "required": [
+        "id",
+        "track",
+        "project_id",
+        "proj",
+        "src",
+        "by",
+        "kind",
+        "sev",
+        "rank",
+        "msg",
+        "loc",
+        "line",
+        "col",
+        "ref",
+        "fix",
+        "ids",
+        "cwe",
+        "security",
+        "also"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Display content hash including message; unique within a report"
+        },
+        "track": {
+          "type": "string",
+          "description": "Stable tracking key without message; use for trend diffs"
+        },
+        "proj": {
+          "type": "string"
+        },
+        "src": {
+          "enum": [
+            "SonarQube",
+            "Snyk",
+            "Trivy",
+            "Semgrep",
+            "Dependabot",
+            "ClamAV",
+            "GuardDog",
+            "Gitleaks",
+            "OSV-Scanner",
+            "zizmor"
+          ]
+        },
+        "by": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "kind": {
+          "type": "string"
+        },
+        "sev": {
+          "type": "string"
+        },
+        "rank": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "msg": {
+          "type": "string"
+        },
+        "loc": {
+          "type": "string",
+          "description": "File path, or package@version"
+        },
+        "line": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        },
+        "col": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "description": "Column / startOffset; two issues on one line stay distinct"
+        },
+        "ref": {
+          "type": "string",
+          "description": "The tool's own rule or advisory id"
+        },
+        "fix": {
+          "type": "string"
+        },
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwe": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "also": {
+          "type": "array",
+          "description": "Other sightings merged into this row",
+          "items": {
+            "type": "object",
+            "properties": {
+              "src": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "sev": {
+                "type": "string"
+              },
+              "msg": {
+                "type": "string"
+              },
+              "loc": {
+                "type": "string"
+              },
+              "ref": {
+                "type": "string"
+              },
+              "fix": {
+                "type": "string"
+              },
+              "line": {
+                "type": [
+                  "integer",
+                  "string"
+                ]
+              },
+              "col": {
+                "type": [
+                  "integer",
+                  "string"
+                ]
+              },
+              "ids": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "cwe": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "security": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}
