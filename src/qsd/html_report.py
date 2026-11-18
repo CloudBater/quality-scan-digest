@@ -234,8 +234,11 @@ def render(payload):
                        if settings.get(k) is not None)
     dirty = sum(1 for s in summaries if s.get("commit_dirty") is True)
     unknown_dirty = sum(1 for s in summaries if s.get("commit_dirty") is None)
-    subtitle = (f"{html.escape(payload.get('version') or '')} · <b>{len(rows)}</b> findings "
-                f"after merging {stats.get('input', len(rows))} sightings · "
+    shown = sum(1 for r in rows if not (r.get("waiver") or {}).get("status") == "ignore")
+    subtitle = (f"{html.escape(payload.get('version') or '')} · <b>{shown}</b> findings "
+                f"after merging {stats.get('input', len(rows))} sightings"
+                + (f" ({len(rows) - shown} waived and listed separately)" if len(rows) != shown else "")
+                + " · "
                 f"{collected} of {len(sources)} sources collected"
                 f" · {required_n - gaps}/{required_n} required complete"
                 + (f" · {dirty} dirty checkout(s)" if dirty else "")

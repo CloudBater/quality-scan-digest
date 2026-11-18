@@ -8,11 +8,11 @@ could waive its own finding.
 """
 
 import datetime as _dt
-import fnmatch
 import hashlib
 import os
 import re
 import shlex
+import unicodedata
 
 from .model import is_malware
 
@@ -24,6 +24,11 @@ KEYS = {"reason", "until", "ticket", "src", "ref", "loc", "project", "track", "e
 MATCHERS = ("src", "ref", "loc", "track")   # at least one; `project` alone would waive a whole project
 # Rows that need an individual decision: only an exact `track=` may waive them, never a pattern.
 STRICT_KINDS = {"Secret", "Malware", "Malicious Package"}
+# A secret reported under another kind (Trivy DS-0031 is a Misconfiguration, a Semgrep or Sonar
+# rule can be a Vulnerability): by name it is treated like a secret. A false match only means
+# the waiver must name the finding with track=, which is the safe direction.
+_SECRET_LIKE = re.compile(r"secret|passw(?:or)?d|credential|api[-_ ]?key|token|private[-_ ]?key|hard-?coded",
+                          re.IGNORECASE)
 _TICKET = re.compile(r"^[^\s\x00-\x1f]{2,200}$")
 
 
@@ -42,6 +47,8 @@ class Waiver:
         self.src = fields.get("src")
         self.ref = fields.get("ref")
         self.loc = fields.get("loc")
+        self._ref = _glob(self.ref) if self.ref is not None else None
+        self._loc = _glob(self.loc) if self.loc is not None else None
         self.project = fields.get("project")
         self.track = fields.get("track")
         self.matched = 0
@@ -63,10 +70,10 @@ class Waiver:
             if set(row.get("by") or [row["src"]]) != {self.src}:
                 return False
         if self.ref is not None:
-            if not any(fnmatch.fnmatchcase(v, self.ref)
+            if not any(self._ref.fullmatch(v)
                        for v in [row.get("ref", ""), *(row.get("ids") or [])] if v):
                 return False
-        if self.loc is not None and not fnmatch.fnmatchcase(row.get("loc", ""), self.loc):
+        if self.loc is not None and not self._loc.fullmatch(row.get("loc", "")):
             return False
         if self.project is not None and self.project != row.get("project_id"):
             return False
@@ -81,6 +88,24 @@ def _latest(today):
         return today.replace(year=today.year + 1)
     except ValueError:
         return today.replace(year=today.year + 1, day=28)
+
+
+def _glob(pattern):
+    """`*` and `?` stay inside one path segment, `**` crosses `/`, `[` is a plain character.
+
+    fnmatch would let `app/audit/*` reach `app/audit/new/deep.py` and read `pkg[extra]` as a
+    character class; a waiver should cover what it says and nothing more.
+    """
+    out, i = [], 0
+    while i < len(pattern):
+        c = pattern[i]
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+            continue
+        out.append("[^/]*" if c == "*" else "[^/]" if c == "?" else re.escape(c))
+        i += 1
+    return re.compile("".join(out), re.DOTALL)
 
 
 def _fail(line, message):
@@ -113,7 +138,7 @@ def parse(text, today):
         for need in ("reason", "until"):
             if need not in fields:
                 _fail(n, f"{need} is required")
-        if not re.search(r"[^\s\x00-\x1f]", fields["reason"]):
+        if not any(unicodedata.category(ch)[0] in "LNPS" for ch in fields["reason"]):
             _fail(n, "reason must say why")
         if len(fields["reason"]) > 300:
             _fail(n, "reason is longer than 300 characters")
@@ -181,11 +206,14 @@ def apply(rows, waivers, today):
         picked = [r for r in rows if r["waiver"] is None and w.selects(r)]
         for r in picked:
             kinds = {r.get("kind"), *(a.get("kind") for a in r.get("also") or [])}
-            if kinds & STRICT_KINDS or is_malware(r):
+            looks_secret = any(_SECRET_LIKE.search(v or "") for v in
+                               [r.get("ref"), r.get("msg"),
+                                *(x for a in r.get("also") or [] for x in (a.get("ref"), a.get("msg")))])
+            if kinds & STRICT_KINDS or is_malware(r) or looks_secret:
                 if w.track is None:
                     raise WaiverError(
                         f"waiver file line {w.line}: a pattern reaches the "
-                        f"{'/'.join(sorted(k for k in kinds & STRICT_KINDS)) or r['kind']} finding "
+                        f"{'/'.join(sorted(kinds & STRICT_KINDS)) or 'secret-like'} finding "
                         f"{r.get('track')} ({r.get('loc')}); secrets and malware can only be waived "
                         f"one by one, with track=<its track key>")
             if r.get("rank", 5) <= 1 and not w.ticket:

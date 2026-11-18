@@ -173,6 +173,61 @@ class Review(unittest.TestCase):
         self.assertNotIn("counted again", errors[0])
         self.assertIn("no longer applies", errors[0])
 
+    def test_a_secret_reported_under_another_kind_needs_its_exact_key_too(self):
+        # Trivy DS-0031 ("secret in ENV") is a Misconfiguration; the fixture has one.
+        with self.assertRaises(waivers.WaiverError) as cm:
+            build(f"ignore src=Trivy ref=DS-0031 {OK} ticket=P-1\n")
+        self.assertIn("one by one", str(cm.exception))
+        key = by_ref(build(""), "DS-0031")[0]["track"]
+        self.assertEqual(by_ref(build(f"ignore track={key} {OK} ticket=P-1\n"), "DS-0031")[0]
+                         ["waiver"]["status"], "ignore")
+        for row in (synth(kind="Vulnerability", ref="rules.hardcoded-password"),
+                    synth(kind="Code Smell", msg="Hard-coded API key", ref="S2068"),
+                    synth(also=[{"src": "Semgrep", "kind": "Vulnerability", "msg": "leaked token"}])):
+            with self.assertRaises(waivers.WaiverError, msg=str(row)):
+                self.apply(f"ignore src=Snyk {OK} ticket=P-1\n", [row])
+
+    def test_star_stays_inside_one_path_segment_and_double_star_crosses(self):
+        def matches(pattern, loc):
+            rows = [synth(loc=loc, rank=2, sev="MEDIUM")]
+            self.apply(f"ignore loc='{pattern}' {OK}\n", rows)
+            return rows[0]["waiver"] is not None
+        self.assertTrue(matches("app/audit/*", "app/audit/a.py"))
+        self.assertFalse(matches("app/audit/*", "app/audit/new/deep.py"))
+        self.assertTrue(matches("app/audit/**", "app/audit/new/deep.py"))
+        self.assertFalse(matches("app/?.py", "app//.py"))
+        self.assertTrue(matches("app/?.py", "app/a.py"))
+
+    def test_square_brackets_are_plain_characters(self):
+        def matches(pattern, loc):
+            rows = [synth(loc=loc, rank=2, sev="MEDIUM")]
+            self.apply(f"ignore loc='{pattern}' {OK}\n", rows)
+            return rows[0]["waiver"] is not None
+        self.assertTrue(matches("pkg[extra]@1", "pkg[extra]@1"))
+        self.assertFalse(matches("pkg[extra]@1", "pkge@1"))
+        self.assertTrue(matches("a.b+c(d)", "a.b+c(d)"))          # regex characters stay literal
+        self.assertFalse(matches("a.b", "aXb"))
+
+    def test_an_invisible_reason_is_refused(self):
+        for r in ('"\u200b"', '"\u200b \u00a0"'):
+            with self.assertRaises(waivers.WaiverError, msg=r):
+                waivers.parse(f"ignore ref=x until=2027-05-01 reason={r}\n", TODAY)
+
+    def test_the_page_subtitle_counts_what_the_table_shows(self):
+        n = len(build("")["findings"])
+        page = render(build(f"ignore {SMELL} {OK}\n"))
+        self.assertIn(f"<b>{n - 1}</b> findings", page)
+        self.assertIn("1 waived and listed separately", page)
+
+    def test_a_report_without_a_waiver_file_validates_against_the_schema(self):
+        try:
+            import jsonschema
+        except ImportError:
+            self.skipTest("jsonschema not installed")
+        with open(os.path.join(FIX, "..", "..", "schema", "report.schema.json")) as fh:
+            schema = json.load(fh)
+        jsonschema.validate(json.loads(json.dumps(build_payload(load_manifest()))), schema)
+
     def test_an_exact_expect_applies_the_waiver(self):
         p = build(f"ignore src=Semgrep {OK} ticket=P-1 expect=2\n")
         self.assertEqual(p["generated_from"][0]["waived"], 2)

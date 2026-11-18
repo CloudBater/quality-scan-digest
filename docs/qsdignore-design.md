@@ -55,7 +55,7 @@ track src=OSV-Scanner ref=GHSA-xxxx-xxxx-xxxx loc="lock-file: pkg@1.2.3" ticket=
 | `ticket` | for HIGH and above, and always for `track` | The tracking reference |
 | `src` | one of the matchers | The scanner, e.g. `Semgrep` |
 | `ref` | one of the matchers | The rule or advisory id; `*` wildcards allowed inside the value |
-| `loc` | optional | A path or `package@version`; glob |
+| `loc` | optional | A path or `package@version`; `*` and `?` stay in one path segment, `**` crosses `/`, `[` is literal |
 | `project` | optional | Restrict to one project |
 | `track` | alternative | The exact `track` key of one finding (v0.4.0), the precise handle |
 | `expect` | recommended | The number of findings the line is expected to match |

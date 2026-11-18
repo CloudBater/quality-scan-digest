@@ -184,7 +184,7 @@ without hiding them. Pass it explicitly (`--ignore-file path`, or `"ignore_file"
 config); see [`examples/qsdignore.example`](examples/qsdignore.example).
 
 ```
-ignore src=Semgrep ref="python.django.security.injection.tainted-sql-string.*" loc="app/audit/*" expect=16 until=2027-05-01 reason="audit-log text, not SQL"
+ignore src=Semgrep ref="python.django.security.injection.tainted-sql-string.*" loc="app/audit/**" expect=16 until=2027-05-01 reason="audit-log text, not SQL"
 track  ref=GHSA-xxxx-xxxx-xxxx loc="*: example-package@1.2.3" ticket=PROJ-123 until=2027-02-01 reason="upgrade scheduled"
 ```
 
@@ -204,10 +204,15 @@ security findings of CRITICAL or HIGH with neither a waiver nor a ticket.
 - **`expect=N`**: if the line ever matches more than N findings it waives none of them and a strict
   run exits 2, so "ignore this rule" cannot quietly cover new, real findings.
 - **Secrets and malware** can only be waived one by one, with `track=<the finding's track key>`,
-  never by a pattern. `src=` waives a row only if no other scanner also saw it.
+  never by a pattern. That includes a row where another scanner's sighting was merged in, and a
+  finding whose rule or message looks like a secret (secret, password, token, API key, credential,
+  private key, hard-coded), whatever kind its scanner gave it. `src=` waives a row only if no other
+  scanner also saw it.
 - **Stale lines** (matching nothing) are listed in `waivers.stale`. The file's SHA-256 is recorded.
-- Matchers: `src`, `ref` (rule or advisory id), `loc` (path or `package@version`) with `*`
-  wildcards, `project`, and the exact `track` key. No line numbers: they drift.
+- Matchers: `src`, `ref` (rule or advisory id), `loc` (path or `package@version`), `project` (the
+  project name), and the exact `track` key. In `ref` and `loc`, `*` and `?` stay inside one path
+  segment, `**` crosses `/`, and every other character, `[` included, is literal. No line numbers:
+  they drift. `until` is a UTC date and is still valid on that day.
 - **The file is never read from a scanned checkout**, and `ignore_file` inside one is refused;
   otherwise a pull request could waive its own finding. Keep it in the repository that owns the
   scan configuration, reviewed by whoever owns security.
