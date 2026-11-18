@@ -11,7 +11,8 @@ merge only over-counts.
   exact     same project, source, kind, rule, location, line, column and message
   advisory  same project and package (ecosystem-aware) and a shared CVE/GHSA id,
             reported by DIFFERENT scanners. Rows with no package never bridge two
-            packages.
+            packages. A malware or malicious-package report never merges with an ordinary
+            advisory: it would be counted as one more vulnerable package.
   sast      OFF by default. Same project, file, line and CWE, reported by
             DIFFERENT scanners; each row joins at most one group, so findings
             never chain into each other.
@@ -22,7 +23,7 @@ its own determination (Snyk files one CVE under several ids, one per affected ra
 and only a second scanner agreeing is evidence of a duplicate.
 """
 
-from .model import rank
+from .model import is_malware, rank
 
 # Which sighting becomes the primary row of a group: the richest metadata first.
 SOURCE_PREFERENCE = ("Snyk", "Semgrep", "SonarQube", "OSV-Scanner", "Trivy", "Dependabot",
@@ -122,13 +123,18 @@ def _compatible(a, b):
 def advisory(rows):
     uf = _UF(len(rows))
     scanners = {i: set(r.get("by") or [r["src"]]) for i, r in enumerate(rows)}
+    malicious = {i: is_malware(r) for i, r in enumerate(rows)}   # a group is all malware or none
 
     def join(a, b):
         ra, rb = uf.find(a), uf.find(b)
         if ra == rb or scanners[ra] & scanners[rb]:
             return  # never merge two rows one scanner reported separately
+        if malicious[ra] != malicious[rb]:
+            return  # malware stays its own finding, and is counted as malware
         uf.union(ra, rb)
-        scanners[uf.find(ra)] = scanners[ra] | scanners[rb]
+        root = uf.find(ra)
+        scanners[root] = scanners[ra] | scanners[rb]
+        malicious[root] = malicious[ra]
 
     known = [i for i, r in enumerate(rows) if r.get("ids") and r.get("_package")]
     unknown = [i for i, r in enumerate(rows) if r.get("ids") and not r.get("_package")]
