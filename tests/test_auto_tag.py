@@ -63,6 +63,18 @@ class Rules(unittest.TestCase):
             auto_tag.decide("0.9.0", tags)  # 0.9.0 < 0.10.0
 
 
+FAKE_GH = """#!/bin/sh
+echo "$@" >> "$FAKE_GH_STORE/calls"
+echo "$GH_TOKEN" > "$FAKE_GH_STORE/token"
+[ "$1 $2" = "release view" ] && {
+  [ -f "$FAKE_GH_STORE/fail-view" ] && { echo "HTTP 502 bad gateway" >&2; exit 1; }
+  [ -f "$FAKE_GH_STORE/rel-$3" ] && exit 0
+  echo "release not found" >&2; exit 1; }
+[ "$1 $2" = "release create" ] && { cat > "$FAKE_GH_STORE/rel-$3"; exit 0; }
+exit 2
+"""
+
+
 class Repo:
     """A bare origin and a working clone with the files the script reads."""
 
@@ -107,6 +119,35 @@ class Repo:
 
     def remote_tags(self):
         return self.git("tag", "-l", cwd=self.origin).split()
+
+    def with_fake_gh(self, fail_view=False):
+        """Put a stand-in `gh` first on PATH: it keeps a Release store in a directory."""
+        self.store = os.path.join(self.tmp, "gh-store")
+        os.makedirs(self.store)
+        bindir = os.path.join(self.tmp, "bin")
+        os.makedirs(bindir)
+        fake = os.path.join(bindir, "gh")
+        with open(fake, "w") as fh:
+            fh.write(FAKE_GH)
+        os.chmod(fake, 0o755)
+        if fail_view:
+            open(os.path.join(self.store, "fail-view"), "w").close()
+        return {"PATH": bindir + os.pathsep + os.environ["PATH"], "FAKE_GH_STORE": self.store,
+                "GITHUB_TOKEN": "s3cret-token"}
+
+    def gh_calls(self):
+        path = os.path.join(self.store, "calls")
+        if not os.path.exists(path):
+            return []
+        with open(path) as fh:
+            return fh.read().splitlines()
+
+    def release_notes(self, tag):
+        path = os.path.join(self.store, f"rel-{tag}")
+        if not os.path.exists(path):
+            return None
+        with open(path) as fh:
+            return fh.read()
 
     def cleanup(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -182,6 +223,80 @@ class WithGit(unittest.TestCase):
         r = self.repo(changelog="# Changelog\n", tags=("v0.4.0",))
         for args in ((), ("--check",)):
             self.assertEqual(r.run(*args).returncode, 0)
+
+    def test_a_new_tag_also_gets_a_release_with_the_changelog_notes(self):
+        r = self.repo(tags=("v0.3.0",))
+        env = r.with_fake_gh()
+        res = r.run(**env)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("v0.4.0", r.remote_tags())
+        self.assertEqual(r.release_notes("v0.4.0").strip(), "- the notes\n- more notes")
+        create = [c for c in r.gh_calls() if c.startswith("release create")][0]
+        self.assertIn("--verify-tag", create)       # never creates a tag of its own
+        self.assertIn("--latest", create)
+        self.assertNotIn("s3cret-token", " ".join(r.gh_calls()))  # token: environment only
+        with open(os.path.join(r.store, "token")) as fh:
+            self.assertEqual(fh.read().strip(), "s3cret-token")
+
+    def test_a_tag_without_a_release_gets_just_the_release_and_the_tag_stays(self):
+        r = self.repo(tags=("v0.4.0",))     # what v0.4.1 looked like: tagged, no Release
+        before = r.git("rev-parse", "v0.4.0", cwd=r.origin)
+        res = r.run(**r.with_fake_gh())
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("created the v0.4.0 Release", res.stdout)
+        self.assertEqual(r.release_notes("v0.4.0").strip(), "- the notes\n- more notes")
+        self.assertEqual(r.git("rev-parse", "v0.4.0", cwd=r.origin), before)
+
+    def test_an_existing_release_is_never_edited_or_recreated(self):
+        r = self.repo(tags=("v0.4.0",))
+        env = r.with_fake_gh()
+        with open(os.path.join(r.store, "rel-v0.4.0"), "w") as fh:
+            fh.write("hand-written notes\n")
+        res = r.run(**env)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(r.release_notes("v0.4.0"), "hand-written notes\n")
+        self.assertFalse([c for c in r.gh_calls() if c.startswith("release create")])
+        self.assertFalse([c for c in r.gh_calls() if "edit" in c or "delete" in c])
+
+    def test_an_old_tag_with_no_changelog_section_needs_no_release_and_does_not_fail(self):
+        r = self.repo(changelog="# Changelog\n", tags=("v0.4.0",))
+        res = r.run(**r.with_fake_gh())
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(r.gh_calls(), [])
+
+    def test_a_failing_release_lookup_fails_the_job_instead_of_guessing(self):
+        r = self.repo(tags=("v0.4.0",))
+        res = r.run(**r.with_fake_gh(fail_view=True))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("could not look up", res.stdout)
+        self.assertIsNone(r.release_notes("v0.4.0"))
+
+    def test_without_gh_the_job_fails_loudly_after_tagging(self):
+        r = self.repo()
+        bindir = os.path.join(r.tmp, "gitonly")
+        os.makedirs(bindir)
+        os.symlink(shutil.which("git"), os.path.join(bindir, "git"))   # git, but no gh
+        res = r.run(GITHUB_TOKEN="t", PATH=bindir)
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("`gh` is not installed", res.stdout)
+        self.assertIn("v0.4.0", r.remote_tags())
+
+    def test_check_mode_says_it_would_publish_a_release_and_calls_nothing(self):
+        r = self.repo()
+        env = r.with_fake_gh()
+        res = r.run("--check", **env)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("GitHub Release", res.stdout)
+        self.assertEqual(r.gh_calls(), [])
+
+    def test_no_token_means_no_gh_call(self):
+        r = self.repo()
+        env = r.with_fake_gh()
+        env.pop("GITHUB_TOKEN")
+        res = r.run(**env)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(r.gh_calls(), [])
+        self.assertIn("v0.4.0", r.remote_tags())
 
     def test_unknown_arguments_are_rejected(self):
         r = self.repo()

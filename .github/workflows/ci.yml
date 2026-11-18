@@ -33,8 +33,9 @@ jobs:
       - run: python3 .github/scripts/auto_tag.py --check
 
   # After a push to main whose tests passed: tag the version in src/qsd/__init__.py as vX.Y.Z
-  # when that tag does not exist yet. Needs write access to contents, which the workflow
-  # default (read) does not grant; nothing else in this file has it.
+  # when that tag does not exist yet, and publish its GitHub Release if there is none. Needs
+  # write access to contents, which the workflow default (read) does not grant; nothing else
+  # in this file has it.
   tag:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
