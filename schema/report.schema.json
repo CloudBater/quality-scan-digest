@@ -54,7 +54,8 @@
           "complete",
           "note",
           "suppressed",
-          "optional"
+          "optional",
+          "partial"
         ],
         "properties": {
           "collected": {
@@ -75,6 +76,11 @@
           "optional": {
             "type": "boolean",
             "description": "True when skipped via --tools; does not fail --strict"
+          },
+          "partial": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Files or items the tool could only partly scan. The source can still be complete; a value above 0 means this is a PARTIAL SCAN of those files, not a full one (e.g. Semgrep files it could only partly parse)."
           }
         }
       }

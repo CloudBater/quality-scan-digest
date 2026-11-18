@@ -78,18 +78,37 @@ def fetch_all(host, token, path, params, key):
         page += 1
 
 
+def waived_count(host, token, project_key):
+    """(count, error): issues someone ACCEPTED or marked FALSE_POSITIVE.
+
+    `resolved=true` is the wrong question: it also covers FIXED and REMOVED, which are
+    closed fixes, not waivers (SonarQube lists FALSE-POSITIVE, WONTFIX, FIXED, REMOVED as
+    resolutions). Servers older than 10.4 do not know `issueStatuses`, so they get the
+    older `resolutions` filter. On failure the count is None with the reason, never 0:
+    an unknown count must not read as "nothing waived".
+    """
+    last = ""
+    for params in ({"issueStatuses": "ACCEPTED,FALSE_POSITIVE"},
+                   {"resolutions": "FALSE-POSITIVE,WONTFIX"}):
+        try:
+            data = api(host, token, "/api/issues/search",
+                       {"components": project_key, "ps": 1, **params})
+            return int((data.get("paging") or {}).get("total") or 0), ""
+        except (SonarError, Forbidden, TypeError, ValueError) as exc:
+            last = str(exc) or exc.__class__.__name__
+    return None, last
+
+
 def fetch(host, token, project_key):
     """Read one project from a server into the same shape `export` writes."""
     issues, total = fetch_all(host, token, "/api/issues/search",
                               {"components": project_key, "resolved": "false"}, "issues")
     doc = {"issues": {"issues": issues, "total": total}}
-    # Resolved / won't-fix issues are waived, not open findings — count only.
-    try:
-        resolved = api(host, token, "/api/issues/search",
-                       {"components": project_key, "resolved": "true", "ps": 1})
-        doc["suppressed"] = int((resolved.get("paging") or {}).get("total") or 0)
-    except (SonarError, Forbidden, TypeError, ValueError):
-        doc["suppressed"] = 0
+    # Accepted / false-positive issues are waived, not open findings: counted only.
+    count, err = waived_count(host, token, project_key)
+    doc["suppressed"] = count or 0
+    if count is None:
+        doc["suppressed_error"] = err
     try:
         hs, htotal = fetch_all(host, token, "/api/hotspots/search",
                                {"project": project_key, "status": "TO_REVIEW"}, "hotspots")
@@ -167,5 +186,9 @@ def to_rows(doc, label, project_id=None):
             line=h.get("line"), ref=h.get("ruleKey", ""),
             col=(h.get("textRange") or {}).get("startOffset"),
         ))
-    return rows, status(note="; ".join(notes),
+    # Not a gap in the findings, but it must not pass silently as "0 waived".
+    info = []
+    if doc.get("suppressed_error"):
+        info.append(f"waived-issue count unavailable ({str(doc['suppressed_error'])[:80]})")
+    return rows, status(note="; ".join(notes + info), complete=not notes,
                         suppressed=int(doc.get("suppressed") or 0)), measures

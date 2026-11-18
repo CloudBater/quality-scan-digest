@@ -25,7 +25,7 @@ import urllib.request
 from importlib import resources
 
 from .model import safe_name
-from .parsers.sonarqube import MEASURE_KEYS, Forbidden, SonarError, api, fetch_all
+from .parsers.sonarqube import MEASURE_KEYS, Forbidden, SonarError, api, fetch_all, waived_count
 
 TOOLS = ("sonarqube", "snyk", "trivy", "semgrep", "dependabot", "osv", "zizmor", "clamav",
          "guarddog", "gitleaks")
@@ -75,15 +75,18 @@ _SONAR_ALLOWED = frozenset({
     "sonar.coverage.jacoco.xmlReportPaths", "sonar.junit.reportPaths",
     "sonar.python.version",
 })
-# Properties a checkout's sonar-project.properties must not set: the scanner
-# container receives SONAR_TOKEN, so an executable override is a token-theft path.
-_SONAR_PROPS_FORBIDDEN_PREFIXES = ("sonar.scanner.", "sonar.host.", "sonar.login",
-                                   "sonar.password", "sonar.token")
-_SONAR_PROPS_FORBIDDEN = frozenset({
-    "sonar.nodejs.executable", "sonar.nodejs.forceExecutable",
-    "sonar.working.directory", "sonar.projectKey", "sonar.organization",
-    "sonar.scm.disabled", "sonar.scm.provider",
-})
+# What a checkout's own sonar-project.properties may NOT set. The scanner container
+# receives SONAR_TOKEN, so anything that makes it run a checkout-supplied binary or
+# send the token elsewhere is a token-theft path.
+#
+# Only keys the command line does NOT already pin are listed. The scanner command
+# overrides the file for sonar.projectKey, sonar.host.url, sonar.working.directory,
+# sonar.scm.disabled and sonar.nodejs.executable (command-line -D beats the properties
+# file), so forbidding those would add nothing and would reject ordinary files: a
+# SonarCloud-style `sonar.projectKey=myapp` line is common in real repositories.
+_SONAR_PROPS_FORBIDDEN_PREFIXES = ("sonar.scanner.", "sonar.login", "sonar.password",
+                                   "sonar.token")
+_SONAR_PROPS_FORBIDDEN = frozenset({"sonar.nodejs.forceExecutable"})
 SEMGREP_MODES = ("auto", "ci", "public")
 
 
@@ -140,23 +143,66 @@ def _inside(base, *parts):
     return p
 
 
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "f": "\f"}
+
+
+def _properties_keys(text):
+    """Keys of a Java .properties file, parsed by Java's rules.
+
+    A key ends at the first unescaped `=`, `:` or whitespace (so `a.b:c` and `a.b c` set
+    key `a.b` just like `a.b=c`); a line starting with `#` or `!` is a comment (`#`
+    later in a line is not); a trailing backslash continues the line; keys may contain
+    backslash escapes and \\uXXXX. A parser that only split on `=` could be bypassed by
+    the other separators or by escapes.
+    """
+    keys, logical, carry = [], "", False
+    for raw in text.splitlines():
+        line = raw if carry else raw.lstrip(" \t\f")
+        if not carry and (not line or line[0] in "#!"):
+            continue
+        if carry:
+            line = line.lstrip(" \t\f")
+        slashes = len(line) - len(line.rstrip("\\"))
+        if slashes % 2:  # odd number of trailing backslashes: the line continues
+            logical, carry = logical + line[:-1], True
+            continue
+        logical, carry = logical + line, False
+        key, i = [], 0
+        while i < len(logical):
+            ch = logical[i]
+            if ch == "\\" and i + 1 < len(logical):
+                nxt = logical[i + 1]
+                if nxt == "u" and re.fullmatch(r"[0-9a-fA-F]{4}", logical[i + 2:i + 6] or ""):
+                    key.append(chr(int(logical[i + 2:i + 6], 16)))
+                    i += 6
+                    continue
+                key.append(_ESCAPES.get(nxt, nxt))
+                i += 2
+                continue
+            if ch in "=: \t\f":
+                break
+            key.append(ch)
+            i += 1
+        if key:
+            keys.append("".join(key))
+        logical = ""
+    return keys
+
+
 def _reject_dangerous_sonar_properties(path):
-    """Refuse a checkout sonar-project.properties that redirects host/token/executables."""
+    """Refuse a checkout sonar-project.properties that could redirect the scanner or token."""
     props = os.path.join(path, "sonar-project.properties")
     if not os.path.isfile(props):
         return
     try:
         with open(props, encoding="utf-8", errors="replace") as fh:
-            lines = fh.readlines()
+            text = fh.read()
     except OSError as exc:
         raise SonarError(f"cannot read sonar-project.properties ({exc.__class__.__name__})") from exc
-    for raw in lines:
-        line = raw.split("#", 1)[0].strip()
-        if not line or "=" not in line:
-            continue
-        key = line.split("=", 1)[0].strip()
+    for key in _properties_keys(text):
         if key in _SONAR_PROPS_FORBIDDEN or key.startswith(_SONAR_PROPS_FORBIDDEN_PREFIXES):
-            raise SonarError(f"sonar-project.properties sets forbidden {key}")
+            raise SonarError(f"sonar-project.properties sets {key}, which could run a "
+                             f"checkout-supplied program or send the token elsewhere")
 
 
 def validate(config, base):
@@ -182,7 +228,7 @@ def validate(config, base):
             if key not in _SONAR_ALLOWED:
                 raise ConfigError(f"{name}: sonar_args entry {arg!r} is not an allowed analysis "
                                   f"property (exact allowlist only; no wildcards or executables)")
-    partial = config.get("semgrep_partial_is_gap", True)
+    partial = config.get("semgrep_partial_is_gap", False)
     if not isinstance(partial, bool):
         raise ConfigError("semgrep_partial_is_gap must be true or false")
     mode = config.get("semgrep_mode", "auto")
@@ -301,8 +347,13 @@ class Sonar:
             hotspots = {"hotspots": [], "error": "forbidden: token is not a user token"}
         measures = api(self.host, self.token, "/api/measures/component",
                        {"component": key, "metricKeys": MEASURE_KEYS})
+        issues_doc = {"issues": issues, "total": total}
+        waived, err = waived_count(self.host, self.token, key)
+        issues_doc["suppressed"] = waived or 0
+        if waived is None:
+            issues_doc["suppressed_error"] = err
         out = {}
-        for name, doc in (("issues", {"issues": issues, "total": total}),
+        for name, doc in (("issues", issues_doc),
                           ("hotspots", hotspots), ("measures", measures)):
             path = os.path.join(raw, f"sonar-{key}-{name}.json")
             with open(path, "w", encoding="utf-8") as fh:
@@ -396,7 +447,7 @@ def scan(config, base, out_dir, version="", tools=TOOLS):
                 "trivy_severity": config.get("trivy_severity", "CRITICAL,HIGH"),
                 "semgrep": _semgrep_label(config.get("semgrep_mode", "auto")),
                 "semgrep_mode": config.get("semgrep_mode", "auto"),
-                "semgrep_partial_is_gap": bool(config.get("semgrep_partial_is_gap", True)),
+                "semgrep_partial_is_gap": bool(config.get("semgrep_partial_is_gap", False)),
                 "tools": ",".join(tools),
                 # Digests actually referenced this run — pin ≠ what ran if PATH wins.
                 "images": {
@@ -414,7 +465,7 @@ def scan(config, base, out_dir, version="", tools=TOOLS):
         projects.append({"cfg": p, "path": path, "name": p["name"], "out": {
             "name": p["name"], "label": p.get("label") or p["name"],
             "repo": p.get("repo", ""), "commit": sha, "commit_dirty": dirty, "notes": {},
-            "semgrep_partial_is_gap": bool(config.get("semgrep_partial_is_gap", True))}})
+            "semgrep_partial_is_gap": bool(config.get("semgrep_partial_is_gap", False))}})
 
     shim = _python_shim() if "snyk" in tools else None
     sonar = None
@@ -426,21 +477,37 @@ def scan(config, base, out_dir, version="", tools=TOOLS):
                     pr["out"]["notes"]["SonarQube"] = "docker not on PATH"
             else:
                 sonar = Sonar(logs)
+                errors = (SonarError, OSError, ValueError, KeyError)
+
+                def fail(pr, exc):
+                    warn(f"SonarQube {pr['name']}: {exc}")
+                    pr["out"]["sonarqube"] = {}
+                    pr["out"]["notes"]["SonarQube"] = str(exc)
                 try:
                     sonar.up()
+                except errors as exc:  # the server itself is down: every project is affected
+                    for pr in projects:
+                        fail(pr, exc)
+                else:
+                    # One project's problem (say, a refused sonar-project.properties) is
+                    # that project's gap, not everyone's.
+                    scanned = []
                     for pr in projects:
                         key = pr["cfg"].get("sonar_project_key") or pr["name"]
-                        sonar.scan(pr["path"], key, os.path.join(logs, f"{pr['name']}.sonar.log"),
-                                   pr["cfg"].get("sonar_args") or ())
-                    for pr in projects:
+                        try:
+                            sonar.scan(pr["path"], key,
+                                       os.path.join(logs, f"{pr['name']}.sonar.log"),
+                                       pr["cfg"].get("sonar_args") or ())
+                            scanned.append(pr)
+                        except errors as exc:
+                            fail(pr, exc)
+                    for pr in scanned:
                         key = pr["cfg"].get("sonar_project_key") or pr["name"]
-                        sonar.wait(key)
-                        pr["out"]["sonarqube"] = sonar.export(key, raw)
-                except (SonarError, OSError, ValueError, KeyError) as exc:
-                    warn(f"SonarQube: {exc}")
-                    for pr in projects:
-                        pr["out"].setdefault("sonarqube", {})
-                        pr["out"]["notes"]["SonarQube"] = str(exc)
+                        try:
+                            sonar.wait(key)
+                            pr["out"]["sonarqube"] = sonar.export(key, raw)
+                        except errors as exc:
+                            fail(pr, exc)
         for pr in projects:
             _scan_project(pr, raw, logs, tools, settings)
     finally:

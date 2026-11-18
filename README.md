@@ -95,9 +95,9 @@ the config file and may not point outside the project. See
 | `gitleaks_log_opts` | Limit the history, e.g. `origin/main..HEAD` |
 | `guarddog` | List of `{"ecosystem": "pypi" \| "npm" \| "go" \| "github_action", "manifest": "requirements.txt"}` |
 | `coverage` | Coverage file: relative path inside the checkout, or an absolute path to a CI artifact (parsed only) |
-| `sonar_args` | Extra `-Dsonar.<allowed>=…` analysis properties (sources, exclusions, language settings, `sourceEncoding`, `projectName` — no scanner/host/token/executable overrides) |
+| `sonar_args` | Extra `-Dsonar.<key>=…` analysis properties from an **exact allowlist**: `sources`, `tests`, the `*.exclusions`/`inclusions` keys, `sourceEncoding`, `projectName`, report paths such as `sonar.python.coverage.reportPaths`, `sonar.python.version`, and a few Java paths. Other language settings (for example `sonar.typescript.tsconfigPaths`) and anything that sets the scanner, host, token or an executable are rejected |
 | `semgrep_mode` | `auto` (default), `ci` (require token, never fall back to public rules), or `public` |
-| `semgrep_partial_is_gap` | default `true`: files Semgrep could only partly parse are a gap (`incomplete`). Set `false` for a note while staying complete (chip + stderr still show the note). A hard Semgrep error is always incomplete |
+| `semgrep_partial_is_gap` | default `false`: files Semgrep could only partly parse are a loudly marked **PARTIAL SCAN** (source stays complete, `sources.*.partial` counts the files, terminal + HTML say so). `true` makes them a gap (`incomplete`, strict exits 2). A hard Semgrep error is always incomplete |
 | `semgrep_branch` | Per project: the branch name `semgrep ci` files the run under (`SEMGREP_BRANCH`) |
 
 Top level: `snyk_severity` (default `high`) and `trivy_severity` (default
@@ -133,6 +133,15 @@ token cannot read hotspots, which is reported as incomplete.
 Exit codes: `1` when **no** source was collected or the input is invalid; **`2` by
 default** when any required source is incomplete (`--lenient` / `--no-strict` to allow;
 `--strict --lenient` together is an error).
+
+**Partial is not the same as incomplete.** Some tools can only partly scan some files. Semgrep,
+for example, reports dozens of "file only partly parsed" warnings on an ordinary Django or
+Next.js repository on every run. That does not make the source *incomplete* (a gap that fails
+strict): if it did, every run would fail. It also is not a full scan, so the source carries
+`partial` (the number of files) and every output says **PARTIAL SCAN**: a `!!` block on the
+terminal, a banner and an amber chip in the HTML report, and a "Security crit + high" tile that
+is never painted green. A low or zero count for those files is weaker evidence than elsewhere.
+Set `semgrep_partial_is_gap: true` to make it fail strict.
 
 A source is **optional** only if the project's `skipped` list names it (`qsd scan` writes
 that list for tools left out of `--tools` and for GuardDog with no `guarddog` list). The
@@ -177,7 +186,7 @@ Parsers themselves keep every affected version and manifest.
                         "findings": 120, "security": 40, "sec_crit_high": 3, "sec_unrated": 1,
                         "malware": 2, "by_source": {…} } ],
   "sources": { "API: Semgrep": { "collected": true, "complete": false,
-                                 "note": "incomplete: 2 scan error(s)", "suppressed": 0, "optional": false } },
+                                 "note": "PARTIAL SCAN: 91 file(s) only partly parsed, so Semgrep did not fully scan them (the rest of the repository was scanned)", "suppressed": 0, "partial": 91, "optional": false } },
   "dedup":   { "input": 180, "passes": ["exact", "advisory"], "exact": 4, "advisory": 56, "output": 120 },
   "findings": [ { "id": "…", "track": "…", "project_id": "api", "proj": "API", "src": "Snyk",
                   "by": ["Snyk", "Dependabot"], "kind": "Dependency", "security": true,
@@ -197,7 +206,8 @@ message, so for those rows `track` is best effort: it can change if a sibling di
 or a message is reworded. **`id`** is the display hash (it includes the message, and the
 column when the tool reports one). Waived findings are counted under
 `sources.*.suppressed` where the tool exposes them: Snyk Code SARIF suppressions,
-zizmor `ignored`, Dependabot dismissed/auto_dismissed, and live Sonar resolved issues.
+zizmor `ignored`, Dependabot dismissed/auto_dismissed, and SonarQube issues that are accepted
+or false positive (not fixed ones).
 Snyk Open Source / IaC / Container JSON and file-exported Sonar do not include waivers,
 so those stay uncounted rather than silently zero.
 

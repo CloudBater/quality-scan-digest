@@ -12,16 +12,36 @@ All notable changes to this project are documented here. The format follows
   Gitleaks now keeps `StartColumn` so same-line secrets stay distinct too.
 - HTML "Security crit + high" turns green only when every *required* source is complete;
   a zero under a gap is no longer painted as clean. Incomplete runs get a banner.
-- Semgrep files it could only partly parse (`warn`) are a **coverage gap by default**
-  (complete=false). Noisy repos may set `semgrep_partial_is_gap: false` to keep the source
-  complete with a note; that note still appears on the HTML chip and on stderr. A hard
-  Semgrep error is always incomplete.
-- `sonar_args` is an **exact** allowlist (no `javascript.*` / `python.*` wildcards) —
+- **Semgrep files it could only partly parse (`warn`) are a PARTIAL SCAN, not a gap.** On
+  real repositories this is the normal state (91 files on a Django backend, 19 on a Next.js
+  frontend, every run), so treating it as an incomplete source made every strict run exit 2,
+  and the published history counted these runs as complete. The source stays *complete*
+  (strict passes) but is never silent: `sources.*.partial` carries the file count, the note
+  begins "PARTIAL SCAN: ... Semgrep did not fully scan them", the terminal prints a
+  `!! PARTIAL SCAN` block, the HTML report gets a banner and an amber chip, and the
+  "Security crit + high" tile is never painted green. `semgrep_partial_is_gap: true` makes it
+  a gap instead. A hard Semgrep error is always incomplete.
+- `sonar_args` is an **exact** allowlist (no `javascript.*` / `python.*` wildcards):
   `sonar.scanner.javaExePath`, `sonar.python.pylint`, `sonar.javascript.node`,
-  `file.suffixes`, host, token overrides are rejected. The scanner command pins
-  `sonar.nodejs.executable=node`, and a checkout `sonar-project.properties` that sets
-  host / token / scanner.* / nodejs.executable is refused.
-- Live Sonar fetches count resolved issues under `sources.*.suppressed` (file exports stay 0).
+  `file.suffixes`, host and token overrides are rejected, and so are the language-specific
+  settings that are not listed (for example `sonar.typescript.tsconfigPaths`).
+- A checkout's own `sonar-project.properties` is parsed by Java's `.properties` rules
+  (separators `=`, `:` and whitespace, `#`/`!` comments only at the start of a line, line
+  continuations, `\uXXXX` escapes) and refused if it sets a key that could run a
+  checkout-supplied program or send the token elsewhere: `sonar.scanner.*`, `sonar.login`,
+  `sonar.password`, `sonar.token`, `sonar.nodejs.forceExecutable`. Keys the scanner command
+  line already pins (`sonar.projectKey`, `sonar.host.url`, `sonar.working.directory`,
+  `sonar.scm.disabled`, `sonar.nodejs.executable`) are not refused: the command line wins, and
+  a `sonar.projectKey=myapp` line is ordinary. A refusal is that project's gap; the other
+  projects are still analysed.
+- SonarQube `sources.*.suppressed` counts issues that are `ACCEPTED` or `FALSE_POSITIVE`
+  (checked against SonarQube 26.8; older servers fall back to the `resolutions` filter),
+  not `resolved=true`, which also includes fixed issues. `qsd scan` exports it too (it used
+  to report none). If the count cannot be read the source says "waived-issue count
+  unavailable" instead of reporting 0.
+- A manifest project that lists no source, or a misspelled Snyk product, is an error
+  instead of contributing zero findings; a source that did run is never optional because a
+  manifest lists it under `skipped`.
 - `track` is unique within a report. It is location and identity without the message, so it
   survives a scanner rewording a title; rows whose key collides (same rule, file and line,
   different message) are told apart by a hash of the message, and identical rows with dedup

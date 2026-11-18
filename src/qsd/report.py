@@ -28,6 +28,12 @@ from .parsers import zizmor as p_zizmor
 SCHEMA_VERSION = "1.1"
 
 
+# Keys of a project in a manifest that name a source. A project with none, or a misspelled
+# product under `snyk`, used to contribute nothing and read as clean.
+SOURCE_KEYS = ("sonarqube", "snyk", "trivy", "semgrep", "dependabot", "osv", "zizmor",
+               "gitleaks", "clamav", "guarddog", "coverage")
+
+
 class ManifestError(ValueError):
     pass
 
@@ -56,6 +62,13 @@ def validate(manifest):
         names.add(name)
         labels.add(label)
         p["name"], p["label"] = name, label
+        if not any(k in p for k in SOURCE_KEYS):
+            raise ManifestError(f"project {name!r} lists no sources ({', '.join(SOURCE_KEYS)}); "
+                                f"it would report zero findings as if it were clean")
+        unknown = sorted(set(p.get("snyk") or {}) - set(p_snyk.PRODUCTS))
+        if unknown:
+            raise ManifestError(f"project {name!r}: unknown snyk product(s) {unknown}; "
+                                f"expected {list(p_snyk.PRODUCTS)}")
         # Sources deliberately not run (--tools, or a tool with nothing configured).
         # Only this list makes a source optional; a note's wording never does.
         skipped = p.get("skipped")
@@ -95,12 +108,18 @@ def collect_project(cfg, sonar_token=""):
 
     def record(source, st, optional=False):
         note = st["note"]
-        opt = optional or bool(st.get("optional")) or source in skipped
+        # `skipped` means "deliberately not run". A source that did run (it was
+        # collected, or it failed) is never optional, even if a hand-written manifest
+        # lists it there: a failure must not be hidden behind a skip.
+        opt = optional or bool(st.get("optional")) or (source in skipped and not st["ok"])
         sources[f"{label}: {source}"] = {
             "collected": bool(st["ok"]),
             "complete": bool(st["ok"]) and st.get("complete", not st["note"]),
             "note": note,
             "suppressed": int(st.get("suppressed") or 0),
+            # Files/items the tool could only partly scan. The source can still be
+            # `complete`; this is what makes a partial scan visible as one.
+            "partial": int(st.get("partial") or 0),
             "optional": opt,
         }
 
@@ -149,12 +168,11 @@ def collect_project(cfg, sonar_token=""):
         file_source(f"Trivy {scan}", path, lambda p: p_trivy.load(p, label, pid))
 
     if "semgrep" in cfg:
-        # Default True: a partial parse is a coverage gap unless the project opts out.
-        partial_gap = cfg.get("semgrep_partial_is_gap")
-        if partial_gap is None:
-            partial_gap = True
+        # Default False: partly parsed files are a loudly marked PARTIAL SCAN, not a gap
+        # (see parsers/semgrep.py for why). A project can opt in to treating them as one.
         file_source("Semgrep", cfg["semgrep"],
-                    lambda p, g=bool(partial_gap): p_semgrep.load(p, label, pid, g))
+                    lambda p, g=bool(cfg.get("semgrep_partial_is_gap")): p_semgrep.load(
+                        p, label, pid, g))
 
     if "dependabot" in cfg:
         st = file_source("Dependabot", cfg["dependabot"],

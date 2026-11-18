@@ -78,9 +78,9 @@ qsd scan examples/qsd.example.json --release v1.4.0 --out-dir qsd-out
 | `gitleaks_log_opts` | 限縮掃描的歷史範圍，例如 `origin/main..HEAD` |
 | `guarddog` | 清單，例如 `{"ecosystem": "pypi" \| "npm" \| "go" \| "github_action", "manifest": "requirements.txt"}` |
 | `coverage` | 覆蓋率檔案：checkout 內相對路徑，或 CI artifact 的絕對路徑（只解析） |
-| `sonar_args` | 額外的 `-Dsonar.<允許的鍵>=…` 分析參數（sources、exclusions、語言設定、`sourceEncoding`、`projectName`；不可覆寫 scanner／host／token／可執行檔） |
+| `sonar_args` | 額外的 `-Dsonar.<鍵>=…` 分析參數，只接受**精確白名單**：`sources`、`tests`、各種 `exclusions`／`inclusions`、`sourceEncoding`、`projectName`、報告路徑（如 `sonar.python.coverage.reportPaths`）、`sonar.python.version` 與少數 Java 路徑。其他語言設定（例如 `sonar.typescript.tsconfigPaths`），以及任何會改 scanner、host、token 或可執行檔的鍵，一律拒絕 |
 | `semgrep_mode` | `auto`（預設）、`ci`（必須有 token，絕不退回公開規則）、或 `public` |
-| `semgrep_partial_is_gap` | 預設 `true`：Semgrep 只能部分解析的檔案算缺口（`incomplete`）。設 `false` 則只記備註、來源仍算完整（HTML chip 與 stderr 仍會顯示）。Semgrep 的嚴重錯誤一律算不完整 |
+| `semgrep_partial_is_gap` | 預設 `false`：Semgrep 只能部分解析的檔案算醒目標示的**部分掃描（PARTIAL SCAN）**：來源仍算完整，`sources.*.partial` 記錄檔案數，終端機與 HTML 都會明講。`true` 則算缺口（`incomplete`，strict 結束代碼 2）。Semgrep 的嚴重錯誤一律算不完整 |
 | `semgrep_branch` | 每個專案：`semgrep ci` 把這次掃描歸到哪個分支名稱（`SEMGREP_BRANCH`） |
 
 最上層可設定 `snyk_severity`（預設 `high`）和 `trivy_severity`（預設 `CRITICAL,HIGH`）。這些門檻會記錄在報告的 `settings` 裡，因為「門檻以上沒有發現」和「完全沒有發現」是兩回事。
@@ -102,6 +102,8 @@ qsd digest manifest.json --json-out report.json --lenient
 SonarQube 可以從匯出的 API 回應（`issues`、`hotspots`、`measures`）讀取，也可以設定 `SONAR_TOKEN` 後，從 `{"host": "...", "project_key": "..."}` 即時讀取。token 只會送往 `https://` 主機，或本機 loopback 上的 HTTP；不會跟隨轉址，也絕不會從 manifest 讀取 token。請使用 user token：analysis token 讀不到 hotspot，報告會標成不完整。
 
 結束代碼：**沒有任何**來源被收集或輸入無效時為 `1`；**預設**在任何必要來源不完整時為 `2`（`--lenient` / `--no-strict` 才放行；同時給 `--strict --lenient` 會報錯）。
+
+**部分掃描（partial）不等於不完整（incomplete）。** 有些工具只能部分掃描某些檔案；例如 Semgrep 在一般的 Django 或 Next.js repository 上，每次都會回報數十個「檔案只能部分解析」的警告。這不會讓來源變成*不完整*（會讓 strict 失敗的缺口），否則每次都會失敗；但它也不是完整掃描，所以來源會帶 `partial`（檔案數），所有輸出都會標明 **PARTIAL SCAN**：終端機的 `!!` 區塊、HTML 的橫幅與琥珀色標籤，而且「Security crit + high」方塊絕不會顯示成綠色。對這些檔案而言，低數字或零，證據力比其他地方弱。設 `semgrep_partial_is_gap: true` 可讓它讓 strict 失敗。
 
 來源只有在專案的 `skipped` 清單裡列出時才算「選用」（`qsd scan` 會為 `--tools` 沒選的工具、以及沒設定 `guarddog` 清單的 GuardDog 寫入這份清單）。備註文字寫了什麼，都不會讓來源變成選用。手寫 manifest 時，請把你刻意沒跑的列在 `"skipped": ["Semgrep", ...]`；其他缺少的來源都會讓 strict 失敗。
 
@@ -135,7 +137,7 @@ Dependabot 以 `open,dismissed,auto_dismissed` 抓取：被 dismiss 的警示計
                         "findings": 120, "security": 40, "sec_crit_high": 3, "sec_unrated": 1,
                         "malware": 2, "by_source": {…} } ],
   "sources": { "API: Semgrep": { "collected": true, "complete": false,
-                                 "note": "incomplete: 2 scan error(s)", "suppressed": 0, "optional": false } },
+                                 "note": "PARTIAL SCAN: 91 file(s) only partly parsed, so Semgrep did not fully scan them (the rest of the repository was scanned)", "suppressed": 0, "partial": 91, "optional": false } },
   "dedup":   { "input": 180, "passes": ["exact", "advisory"], "exact": 4, "advisory": 56, "output": 120 },
   "findings": [ { "id": "…", "track": "…", "project_id": "api", "proj": "API", "src": "Snyk",
                   "by": ["Snyk", "Dependabot"], "kind": "Dependency", "security": true,

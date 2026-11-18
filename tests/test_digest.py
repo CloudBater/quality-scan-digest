@@ -81,13 +81,18 @@ class Parsers(unittest.TestCase):
         self.assertTrue(st["ok"])
         self.assertIn("incomplete", st["note"])
         self.assertFalse(semgrep.load(tmpjson({"error": "x"}), "A")[1]["ok"])
-        # Partly parsed files are a coverage gap by default; opt out with partial_is_gap=False.
+        # Partly parsed files: by default the source stays complete (a normal repo has dozens,
+        # and strict would fail every run) but it is marked as a PARTIAL SCAN, never silent.
         warn = tmpjson({"results": [], "errors": [{"level": "warn"}]})
         _, st = semgrep.load(warn, "A")
-        self.assertEqual((st["complete"], st["note"]),
-                         (False, "incomplete: 1 file(s) only partly parsed"))
-        _, st = semgrep.load(warn, "A", partial_is_gap=False)
-        self.assertEqual((st["complete"], st["note"]), (True, "1 file(s) only partly parsed"))
+        self.assertTrue(st["complete"])
+        self.assertEqual(st["partial"], 1)
+        self.assertIn("PARTIAL SCAN: 1 file(s) only partly parsed", st["note"])
+        self.assertIn("did not fully scan", st["note"])
+        # Opting in turns it into a gap.
+        _, st = semgrep.load(warn, "A", partial_is_gap=True)
+        self.assertEqual((st["complete"], st["note"], st["partial"]),
+                         (False, "incomplete: 1 file(s) only partly parsed", 1))
         # A hard error is a gap either way.
         hard = tmpjson({"results": [], "errors": [{"level": "error"}, {"level": "warn"}]})
         for gap in (False, True):
@@ -96,9 +101,10 @@ class Parsers(unittest.TestCase):
     def test_semgrep_partial_parse_setting_reaches_the_report_and_the_manifest(self):
         from qsd import runner
         f = tmpjson({"results": [], "errors": [{"level": "warn"}]})
-        # Omitted → default gap (complete False). Explicit False keeps complete.
+        # Omitted -> note-only: complete, but marked partial. Opting in makes it a gap.
         src = build_payload({"projects": [{"name": "a", "semgrep": f}]})["sources"]["a: Semgrep"]
-        self.assertFalse(src["complete"])
+        self.assertTrue(src["complete"])
+        self.assertEqual(src["partial"], 1)
         for flag in (False, True):
             src = build_payload({"projects": [{"name": "a", "semgrep": f,
                                                "semgrep_partial_is_gap": flag}]})["sources"]["a: Semgrep"]
@@ -106,11 +112,11 @@ class Parsers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             m, _ = runner.scan({"projects": [{"name": "a", "path": "."}]}, d, os.path.join(d, "o"),
                                tools=())
-            self.assertIs(m["projects"][0]["semgrep_partial_is_gap"], True)
-            self.assertIs(m["settings"]["semgrep_partial_is_gap"], True)
+            self.assertIs(m["projects"][0]["semgrep_partial_is_gap"], False)
+            self.assertIs(m["settings"]["semgrep_partial_is_gap"], False)
             m2, _ = runner.scan({"projects": [{"name": "a", "path": "."}],
-                                 "semgrep_partial_is_gap": False}, d, os.path.join(d, "o2"), tools=())
-            self.assertIs(m2["settings"]["semgrep_partial_is_gap"], False)
+                                 "semgrep_partial_is_gap": True}, d, os.path.join(d, "o2"), tools=())
+            self.assertIs(m2["settings"]["semgrep_partial_is_gap"], True)
             with self.assertRaises(runner.ConfigError):
                 runner.validate({"projects": [{"name": "a", "path": "."}],
                                  "semgrep_partial_is_gap": "yes"}, d)
@@ -335,7 +341,7 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("sec_unrated", s)
         self.assertIn("malware", s)
         src = next(iter(self.p["sources"].values()))
-        self.assertEqual(set(src), {"collected", "complete", "note", "suppressed", "optional"})
+        self.assertEqual(set(src), {"collected", "complete", "note", "suppressed", "partial", "optional"})
 
     def test_track_stable_when_message_rewrites(self):
         from qsd.model import finding, fingerprint, track_key
@@ -430,7 +436,8 @@ class EndToEnd(unittest.TestCase):
                 build_payload({"projects": [{"name": bad}]})
 
     def test_null_metadata_becomes_strings(self):
-        p = build_payload({"version": None, "projects": [{"name": "a", "repo": None}]})
+        p = build_payload({"version": None, "projects": [
+            {"name": "a", "repo": None, "semgrep": fx("semgrep.json")}]})
         self.assertEqual((p["version"], p["generated_from"][0]["repo"]), ("", ""))
 
 
@@ -571,7 +578,7 @@ class Runner(unittest.TestCase):
             p = build_payload(m2)
             self.assertEqual(p["sources"]["a: Semgrep"],
                              {"collected": False, "complete": False, "note": "semgrep not on PATH",
-                              "suppressed": 0, "optional": False})
+                              "suppressed": 0, "partial": 0, "optional": False})
             # Tools left out of --tools still appear, marked optional so --strict ignores them.
             self.assertTrue(p["sources"]["a: ClamAV"]["optional"])
             self.assertEqual(p["sources"]["a: ClamAV"]["note"], "skipped: not in --tools")
@@ -677,8 +684,8 @@ class ReviewFixes(unittest.TestCase):
 
     # -- unknown stays unknown
     def test_commit_dirty_is_null_unless_known(self):
-        get = lambda **kw: build_payload({"projects": [dict({"name": "a"}, **kw)]})[
-            "generated_from"][0]["commit_dirty"]
+        get = lambda **kw: build_payload({"projects": [dict(
+            {"name": "a", "semgrep": fx("semgrep.json")}, **kw)]})["generated_from"][0]["commit_dirty"]
         self.assertIsNone(get())
         self.assertIsNone(get(commit_dirty=None))
         self.assertIs(get(commit_dirty=False), False)
@@ -687,7 +694,7 @@ class ReviewFixes(unittest.TestCase):
         self.assertIs(get(commit_dirty="false"), False)
         self.assertIs(get(commit_dirty="true"), True)
         self.assertIsNone(get(commit_dirty="maybe"))
-        html = render(build_payload({"projects": [{"name": "a"}]}))
+        html = render(build_payload({"projects": [{"name": "a", "semgrep": fx("semgrep.json")}]}))
         self.assertIn("unknown dirty state", html)
 
     # -- Dependabot fetch
@@ -763,10 +770,10 @@ class ReviewFixes(unittest.TestCase):
         from qsd import runner
         with tempfile.TemporaryDirectory() as d:
             with open(os.path.join(d, "sonar-project.properties"), "w") as fh:
-                fh.write("sonar.nodejs.executable=/usr/src/evil\n")
+                fh.write("sonar.scanner.javaExePath=/usr/src/evil\n")
             with self.assertRaises(runner.SonarError) as ctx:
                 runner._reject_dangerous_sonar_properties(d)
-            self.assertIn("nodejs.executable", str(ctx.exception))
+            self.assertIn("javaExePath", str(ctx.exception))
             with open(os.path.join(d, "sonar-project.properties"), "w") as fh:
                 fh.write("sonar.sources=.\nsonar.sourceEncoding=UTF-8\n")
             runner._reject_dangerous_sonar_properties(d)  # harmless keys OK
@@ -824,6 +831,233 @@ class ReviewFixes(unittest.TestCase):
 def shutil_rmtree(path):
     import shutil
     shutil.rmtree(path, ignore_errors=True)
+
+
+class ReviewRound2(unittest.TestCase):
+    """Second independent review: each test fails if its fix is reverted."""
+
+    def partial_manifest(self, n=91):
+        f = tmpjson({"results": [], "errors": [{"level": "warn"}] * n})
+        return {"projects": [{"name": "a", "semgrep": f}]}
+
+    def run_cli(self, manifest, *extra):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "m.json")
+        with open(path, "w") as fh:
+            json.dump(manifest, fh)
+        env = dict(os.environ, PYTHONPATH=os.path.join(HERE, "..", "src"))
+        return subprocess.run([sys.executable, "-m", "qsd", "digest", path, "--json-out",
+                               os.path.join(d, "r.json"), "--html-out", os.path.join(d, "r.html"),
+                               *extra], env=env, capture_output=True, text=True), d
+
+    # -- a partial scan is passed by strict, but never silent
+    def test_partly_parsed_semgrep_passes_strict_yet_is_announced_as_a_partial_scan(self):
+        r, d = self.run_cli(self.partial_manifest(91))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("!! PARTIAL SCAN", r.stderr)
+        self.assertIn("a: Semgrep: 91 file(s) only partly scanned", r.stderr)
+        with open(os.path.join(d, "r.json")) as fh:
+            src = json.load(fh)["sources"]["a: Semgrep"]
+        self.assertEqual((src["complete"], src["partial"]), (True, 91))
+        with open(os.path.join(d, "r.html")) as fh:
+            page = fh.read()
+        self.assertIn("PARTIAL SCAN", page)
+        self.assertIn("not a full-scan result", page)
+
+    def test_a_full_scan_prints_no_partial_warning(self):
+        r, _ = self.run_cli(self.partial_manifest(0))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("PARTIAL SCAN", r.stderr)
+
+    def test_opting_in_makes_partly_parsed_files_fail_strict(self):
+        m = self.partial_manifest(3)
+        m["projects"][0]["semgrep_partial_is_gap"] = True
+        self.assertEqual(self.run_cli(m)[0].returncode, 2)
+
+    def test_the_html_never_paints_a_partial_scan_green(self):
+        full = render(build_payload(self.partial_manifest(0)))
+        part = render(build_payload(self.partial_manifest(5)))
+        self.assertIn('tile ok"><b>0</b><span>Security crit + high', full)
+        self.assertNotIn('tile ok"><b>0</b><span>Security crit + high', part)
+        self.assertIn("◐ a: Semgrep — PARTIAL SCAN: 5 file(s) only partly scanned", part)
+        self.assertNotIn("PARTIAL SCAN", full)
+
+    def test_the_subtitle_prints_booleans_in_lowercase(self):
+        p = build_payload(self.partial_manifest(0))
+        p["settings"]["semgrep_partial_is_gap"] = True
+        page = render(p)
+        self.assertIn("semgrep_partial_is_gap: true", page)
+        self.assertNotIn("semgrep_partial_is_gap: True", page)
+
+    # -- digest-path holes
+    def test_a_project_with_no_sources_or_a_misspelled_snyk_product_is_an_error(self):
+        ok = os.path.join(FIX, "semgrep.json")
+        with self.assertRaises(ManifestError) as c:
+            build_payload({"projects": [{"name": "a", "semgrep": ok}, {"name": "b"}]})
+        self.assertIn("lists no sources", str(c.exception))
+        with self.assertRaises(ManifestError) as c:
+            build_payload({"projects": [{"name": "c", "snyk": {"OpenSource": ok}}]})
+        self.assertIn("OpenSource", str(c.exception))
+
+    def test_a_skip_never_hides_a_source_that_ran(self):
+        d = tempfile.mkdtemp()
+        hard = tmpjson({"results": [], "errors": [{"level": "error"}]})
+        s = build_payload({"projects": [{"name": "a", "semgrep": hard, "skipped": ["Semgrep"]}]})
+        self.assertFalse(s["sources"]["a: Semgrep"]["optional"])
+        s = build_payload({"projects": [{"name": "a", "semgrep": os.path.join(d, "none.json"),
+                                         "skipped": ["Semgrep"]}]})
+        self.assertTrue(s["sources"]["a: Semgrep"]["optional"])
+
+    # -- sonar-project.properties: parsed by Java's rules, and only what is not pinned
+    def test_properties_keys_follow_java_rules(self):
+        from qsd.runner import _properties_keys
+        text = ("# c\nsonar.projectKey=myapp\nsonar.scanner.javaExePath:/x\n"
+                "sonar.scanner.javaExePath /y\nsonar.sources=src,\\\n   lib\n"
+                "sonar.sc\\u0061nner.javaExePath=/z\n ! also a comment\na\\:b=1\n")
+        self.assertEqual(_properties_keys(text), [
+            "sonar.projectKey", "sonar.scanner.javaExePath", "sonar.scanner.javaExePath",
+            "sonar.sources", "sonar.scanner.javaExePath", "a:b"])
+
+    def test_every_separator_form_of_a_forbidden_key_is_refused_and_pinned_keys_are_not(self):
+        from qsd import runner
+        for line in ("sonar.scanner.javaExePath=/x", "sonar.scanner.javaExePath:/x",
+                     "sonar.scanner.javaExePath /x", "sonar.sc\\u0061nner.javaExePath=/x",
+                     "sonar.login=t", "sonar.nodejs.forceExecutable=/x"):
+            d = tempfile.mkdtemp()
+            with open(os.path.join(d, "sonar-project.properties"), "w") as fh:
+                fh.write(line + "\n")
+            with self.assertRaises(runner.SonarError, msg=line):
+                runner._reject_dangerous_sonar_properties(d)
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "sonar-project.properties"), "w") as fh:
+            fh.write("sonar.projectKey=myapp\nsonar.organization=o\nsonar.host.url=http://x\n"
+                     "sonar.sources=src\n")
+        runner._reject_dangerous_sonar_properties(d)  # command line pins these, so they are harmless
+
+    def test_the_scanner_checks_the_properties_file_before_it_runs_anything(self):
+        from qsd import runner
+        calls = []
+        real = runner.run
+        runner.run = lambda *a, **k: calls.append(a) or 0
+        try:
+            d = tempfile.mkdtemp()
+            with open(os.path.join(d, "sonar-project.properties"), "w") as fh:
+                fh.write("sonar.scanner.javaExePath:/evil\n")
+            s = runner.Sonar(d)
+            try:
+                with self.assertRaises(runner.SonarError):
+                    s.scan(d, "k", os.path.join(d, "x.log"))
+            finally:
+                shutil_rmtree(s.secret_dir)
+        finally:
+            runner.run = real
+        self.assertEqual(calls, [])
+
+    def test_one_projects_refused_properties_do_not_blank_the_others(self):
+        from qsd import runner
+
+        class FakeSonar:
+            def __init__(self, logs): pass
+            def up(self): pass
+            def down(self): pass
+            def wait(self, key): pass
+            def scan(self, path, key, logfile, extra=()):
+                if key == "bad":
+                    raise runner.SonarError("sonar-project.properties sets sonar.scanner.javaExePath")
+            def export(self, key, raw):
+                return {"issues": os.path.join(raw, f"{key}.json")}
+        real_sonar, real_have = runner.Sonar, runner.have
+        runner.Sonar, runner.have = FakeSonar, (lambda t: True)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                for n in ("good", "bad"):
+                    os.mkdir(os.path.join(d, n))
+                m, _ = runner.scan({"projects": [{"name": "good", "path": "good"},
+                                                  {"name": "bad", "path": "bad"}]},
+                                   d, os.path.join(d, "o"), tools=("sonarqube",))
+        finally:
+            runner.Sonar, runner.have = real_sonar, real_have
+        good, bad = m["projects"]
+        self.assertNotIn("SonarQube", good["notes"])
+        self.assertTrue(good["sonarqube"])
+        self.assertIn("javaExePath", bad["notes"]["SonarQube"])
+        self.assertEqual(bad["sonarqube"], {})
+
+    # -- waived issues
+    def test_waived_issues_are_accepted_or_false_positive_never_fixed(self):
+        from qsd.parsers import sonarqube as sq
+        seen = []
+
+        def fake(host, token, path, params):
+            seen.append(params)
+            return {"paging": {"total": 7}}
+        real = sq.api
+        sq.api = fake
+        try:
+            self.assertEqual(sq.waived_count("h", "t", "k"), (7, ""))
+        finally:
+            sq.api = real
+        self.assertEqual(seen[0]["issueStatuses"], "ACCEPTED,FALSE_POSITIVE")
+        self.assertNotIn("resolved", seen[0])
+
+    def test_an_older_server_falls_back_and_a_failure_is_never_reported_as_zero(self):
+        from qsd.parsers import sonarqube as sq
+        calls = []
+
+        def old_server(host, token, path, params):
+            calls.append(params)
+            if "issueStatuses" in params:
+                raise sq.SonarError("HTTP 400")
+            return {"paging": {"total": 3}}
+        real = sq.api
+        try:
+            sq.api = old_server
+            self.assertEqual(sq.waived_count("h", "t", "k"), (3, ""))
+            self.assertEqual(calls[1]["resolutions"], "FALSE-POSITIVE,WONTFIX")
+            sq.api = lambda *a, **k: (_ for _ in ()).throw(sq.SonarError("HTTP 500"))
+            count, err = sq.waived_count("h", "t", "k")
+        finally:
+            sq.api = real
+        self.assertIsNone(count)
+        self.assertIn("HTTP 500", err)
+        doc = {"issues": {"issues": [], "total": 0}, "hotspots": {"hotspots": [], "total": 0},
+               "measures": {"component": {"measures": [{"metric": "ncloc", "value": "5"}]}},
+               "suppressed": 0, "suppressed_error": err}
+        _, st, _ = sq.to_rows(doc, "A")
+        self.assertIn("waived-issue count unavailable", st["note"])
+        self.assertTrue(st["complete"])  # informational, not a gap in the findings
+
+    def test_a_live_fetch_records_why_the_waived_count_is_missing(self):
+        from qsd.parsers import sonarqube as sq
+
+        def api(host, token, path, params):
+            if path.endswith("measures/component"):
+                return {"component": {"measures": [{"metric": "ncloc", "value": "9"}]}}
+            raise sq.SonarError("HTTP 500")
+        real = (sq.api, sq.fetch_all)
+        sq.api, sq.fetch_all = api, (lambda *a, **k: ([], 0))
+        try:
+            doc = sq.fetch("https://h", "t", "k")
+        finally:
+            sq.api, sq.fetch_all = real
+        self.assertEqual(doc["suppressed"], 0)
+        self.assertIn("HTTP 500", doc["suppressed_error"])
+
+    def test_a_waived_count_is_exported_by_qsd_scan_too(self):
+        from qsd import runner
+        real = (runner.fetch_all, runner.api, runner.waived_count)
+        runner.fetch_all = lambda *a, **k: ([], 0)
+        runner.api = lambda *a, **k: {"component": {"measures": []}}
+        runner.waived_count = lambda *a, **k: (4, "")
+        d = tempfile.mkdtemp()
+        s = runner.Sonar(d)
+        try:
+            out = s.export("k", d)
+            with open(out["issues"]) as fh:
+                self.assertEqual(json.load(fh)["suppressed"], 4)
+        finally:
+            runner.fetch_all, runner.api, runner.waived_count = real
+            shutil_rmtree(s.secret_dir)
 
 
 if __name__ == "__main__":

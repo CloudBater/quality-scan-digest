@@ -33,8 +33,16 @@ def _write(payload, json_out, html_out):
             state = "incomplete" if v["collected"] else "not collected"
             print(f"  {state}: {name} - {v['note']}", file=sys.stderr)
         elif v.get("note"):
-            # Complete-with-note (e.g. partial parse opted out of being a gap) must still show.
             print(f"  note: {name} - {v['note']}", file=sys.stderr)
+    partial = [(n, v) for n, v in src.items() if v.get("partial") and v["collected"]]
+    if partial:
+        # The source counts as complete (strict passes), but this is NOT a full scan of
+        # those files, and a reader must not walk away thinking it was.
+        print("", file=sys.stderr)
+        print(f"!! PARTIAL SCAN: {len(partial)} source(s) could only partly scan some files, so a "
+              f"missing finding there is weaker evidence than elsewhere:", file=sys.stderr)
+        for n, v in partial:
+            print(f"!!   {n}: {v['partial']} file(s) only partly scanned", file=sys.stderr)
     return collected, complete, len(src)
 
 

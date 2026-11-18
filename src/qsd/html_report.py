@@ -142,10 +142,13 @@ def render(payload):
     # Green only when every required source is complete — a zero under a gap is not clean.
     required = [v for v in sources.values() if not v.get("optional")]
     gaps = sum(1 for v in required if not v.get("complete"))
+    # Sources that are complete but could only partly scan some files (Semgrep partly
+    # parsed files). Not a gap, but not a full scan either, so never painted green.
+    partial_sources = [(n, v) for n, v in sources.items() if v.get("partial") and v["collected"]]
     if crit_high:
         clean_ok = "bad"
-    elif gaps:
-        clean_ok = ""  # zero, but incomplete — neither green nor red
+    elif gaps or partial_sources:
+        clean_ok = ""  # zero, but incomplete or partial — neither green nor red
     else:
         clean_ok = "ok"
 
@@ -180,7 +183,10 @@ def render(payload):
                     f'{html.escape(v["note"])}</span>')
         if not v.get("complete", True):
             return f'<span class="chip part">◐ {html.escape(name)} — {html.escape(v["note"])}</span>'
-        # A complete source can still carry a note (e.g. opt-out partial parse) — show it.
+        if v.get("partial"):
+            return (f'<span class="chip part">◐ {html.escape(name)} — PARTIAL SCAN: '
+                    f'{v["partial"]} file(s) only partly scanned</span>')
+        # A complete source can still carry a note — show it.
         bits = []
         if v.get("suppressed"):
             bits.append(f'{v["suppressed"]} waived')
@@ -196,7 +202,10 @@ def render(payload):
     # Keep the subtitle short: only floors / mode, not the whole images map.
     floor_keys = ("snyk_severity", "trivy_severity", "semgrep", "semgrep_mode",
                   "semgrep_partial_is_gap", "dedup", "tools")
-    floors = ", ".join(f"{k}: {settings[k]}" for k in floor_keys if settings.get(k) is not None)
+    def _fmt(v):
+        return str(v).lower() if isinstance(v, bool) else v
+    floors = ", ".join(f"{k}: {_fmt(settings[k])}" for k in floor_keys
+                       if settings.get(k) is not None)
     dirty = sum(1 for s in summaries if s.get("commit_dirty") is True)
     unknown_dirty = sum(1 for s in summaries if s.get("commit_dirty") is None)
     subtitle = (f"{html.escape(payload.get('version') or '')} · <b>{len(rows)}</b> findings "
@@ -206,11 +215,18 @@ def render(payload):
                 + (f" · {dirty} dirty checkout(s)" if dirty else "")
                 + (f" · {unknown_dirty} checkout(s) with unknown dirty state" if unknown_dirty else "")
                 + (f" · {html.escape(floors)}" if floors else ""))
+    banners = []
     if gaps:
-        banner = (f'<div class="banner">⚠ {gaps} required source(s) incomplete or missing — '
-                  f'a zero count is not a clean scan. Use --lenient only when that is intentional.</div>')
-    else:
-        banner = ""
+        banners.append(f'<div class="banner">⚠ {gaps} required source(s) incomplete or missing — '
+                       f'a zero count is not a clean scan. Use --lenient only when that is '
+                       f'intentional.</div>')
+    if partial_sources:
+        details = "; ".join(f'{html.escape(n)}: {v["partial"]} file(s)' for n, v in partial_sources)
+        banners.append(f'<div class="banner">◐ <b>PARTIAL SCAN</b> — these sources could only partly '
+                       f'scan some files ({details}). The rest was scanned, but a missing finding '
+                       f'in those files is weaker evidence than elsewhere, so a low or zero count '
+                       f'is not a full-scan result.</div>')
+    banner = "".join(banners)
     parts = {
         "TITLE": html.escape(payload["title"]),
         "SUBTITLE": subtitle,
