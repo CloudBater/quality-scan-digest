@@ -97,7 +97,7 @@ the config file and may not point outside the project. See
 | `coverage` | Coverage file: relative path inside the checkout, or an absolute path to a CI artifact (parsed only) |
 | `sonar_args` | Extra `-Dsonar.<allowed>=…` analysis properties (sources, exclusions, language settings, `sourceEncoding`, `projectName` — no scanner/host/token/executable overrides) |
 | `semgrep_mode` | `auto` (default), `ci` (require token, never fall back to public rules), or `public` |
-| `semgrep_partial_is_gap` | `true` makes files Semgrep could only partly parse a gap (`incomplete`); default `false`: a note, source stays complete. A hard Semgrep error is always incomplete |
+| `semgrep_partial_is_gap` | default `true`: files Semgrep could only partly parse are a gap (`incomplete`). Set `false` for a note while staying complete (chip + stderr still show the note). A hard Semgrep error is always incomplete |
 | `semgrep_branch` | Per project: the branch name `semgrep ci` files the run under (`SEMGREP_BRANCH`) |
 
 Top level: `snyk_severity` (default `high`) and `trivy_severity` (default
@@ -196,7 +196,10 @@ whose location and rule collide (two secrets on one line) are told apart by a ha
 message, so for those rows `track` is best effort: it can change if a sibling disappears
 or a message is reworded. **`id`** is the display hash (it includes the message, and the
 column when the tool reports one). Waived findings are counted under
-`sources.*.suppressed`, not dropped silently.
+`sources.*.suppressed` where the tool exposes them: Snyk Code SARIF suppressions,
+zizmor `ignored`, Dependabot dismissed/auto_dismissed, and live Sonar resolved issues.
+Snyk Open Source / IaC / Container JSON and file-exported Sonar do not include waivers,
+so those stay uncounted rather than silently zero.
 
 ## Security notes
 

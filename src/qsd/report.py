@@ -63,8 +63,16 @@ def validate(manifest):
         for k in ("repo", "commit"):
             p[k] = _s(p.get(k))
         # None = unknown (git status failed); do not coerce that into "clean".
+        # Only real booleans (or 0/1 ints) count — the string "false" must not become True.
         dirty = p.get("commit_dirty")
-        p["commit_dirty"] = None if dirty is None else bool(dirty)
+        if dirty is None or isinstance(dirty, bool):
+            p["commit_dirty"] = dirty
+        elif dirty in (0, 1):
+            p["commit_dirty"] = bool(dirty)
+        elif isinstance(dirty, str) and dirty.strip().lower() in ("true", "false"):
+            p["commit_dirty"] = dirty.strip().lower() == "true"
+        else:
+            p["commit_dirty"] = None
     manifest["title"] = _s(manifest.get("title"))
     manifest["version"] = _s(manifest.get("version"))
     return manifest
@@ -141,8 +149,12 @@ def collect_project(cfg, sonar_token=""):
         file_source(f"Trivy {scan}", path, lambda p: p_trivy.load(p, label, pid))
 
     if "semgrep" in cfg:
-        file_source("Semgrep", cfg["semgrep"], lambda p: p_semgrep.load(p, label, pid,
-                                                          bool(cfg.get("semgrep_partial_is_gap"))))
+        # Default True: a partial parse is a coverage gap unless the project opts out.
+        partial_gap = cfg.get("semgrep_partial_is_gap")
+        if partial_gap is None:
+            partial_gap = True
+        file_source("Semgrep", cfg["semgrep"],
+                    lambda p, g=bool(partial_gap): p_semgrep.load(p, label, pid, g))
 
     if "dependabot" in cfg:
         st = file_source("Dependabot", cfg["dependabot"],

@@ -10,7 +10,7 @@ SEV = {"ERROR": "HIGH", "WARNING": "MEDIUM", "INFO": "LOW",
        "CRITICAL": "CRITICAL", "HIGH": "HIGH", "MEDIUM": "MEDIUM", "LOW": "LOW"}
 
 
-def load(path, label, project_id=None, partial_is_gap=False):
+def load(path, label, project_id=None, partial_is_gap=True):
     try:
         doc = read_json(path)
     except (OSError, ValueError) as exc:
@@ -42,14 +42,12 @@ def load(path, label, project_id=None, partial_is_gap=False):
         ))
 
     # Errors and results are independent: findings from some files do not make
-    # up for files that failed or only partly parsed. A partial parse is still a
-    # coverage gap — counting it complete would paint a green zero under a hole.
+    # up for files that failed or only partly parsed. A partial parse is a coverage
+    # gap by default — counting it complete paints a green zero under a hole.
+    # Set semgrep_partial_is_gap=false for noisy repos that only want a note.
     errs = doc.get("errors") or []
     hard = [e for e in errs if str(e.get("level", "error")).lower() != "warn"]
     warns = len(errs) - len(hard)
-    # A file Semgrep could only partly parse (`warn`) is the normal state of a real repo
-    # (language features its parser lacks), so by default it is a note and the source stays
-    # complete; `semgrep_partial_is_gap` makes it a gap. A hard error is always a gap.
     notes = ([f"incomplete: {len(hard)} scan error(s)"] if hard else []) + \
         ([f"{'incomplete: ' if partial_is_gap else ''}{warns} file(s) only partly parsed"]
          if warns else [])

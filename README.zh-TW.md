@@ -80,7 +80,7 @@ qsd scan examples/qsd.example.json --release v1.4.0 --out-dir qsd-out
 | `coverage` | 覆蓋率檔案：checkout 內相對路徑，或 CI artifact 的絕對路徑（只解析） |
 | `sonar_args` | 額外的 `-Dsonar.<允許的鍵>=…` 分析參數（sources、exclusions、語言設定、`sourceEncoding`、`projectName`；不可覆寫 scanner／host／token／可執行檔） |
 | `semgrep_mode` | `auto`（預設）、`ci`（必須有 token，絕不退回公開規則）、或 `public` |
-| `semgrep_partial_is_gap` | `true` 時，Semgrep 只能部分解析的檔案算缺口（`incomplete`）；預設 `false`：只是備註，來源仍算完整。Semgrep 的嚴重錯誤一律算不完整 |
+| `semgrep_partial_is_gap` | 預設 `true`：Semgrep 只能部分解析的檔案算缺口（`incomplete`）。設 `false` 則只記備註、來源仍算完整（HTML chip 與 stderr 仍會顯示）。Semgrep 的嚴重錯誤一律算不完整 |
 | `semgrep_branch` | 每個專案：`semgrep ci` 把這次掃描歸到哪個分支名稱（`SEMGREP_BRANCH`） |
 
 最上層可設定 `snyk_severity`（預設 `high`）和 `trivy_severity`（預設 `CRITICAL,HIGH`）。這些門檻會記錄在報告的 `settings` 裡，因為「門檻以上沒有發現」和「完全沒有發現」是兩回事。
@@ -145,7 +145,7 @@ Dependabot 以 `open,dismissed,auto_dismissed` 抓取：被 dismiss 的警示計
 }
 ```
 
-各工具的嚴重度統一對應到同一個等級（`rank` 0 = CRITICAL/BLOCKER … 4 = INFO，5 = 未評級 `—`）。`security` 依問題的性質判斷（相依套件、container、IaC、設定錯誤、漏洞、hotspot、機密、workflow、惡意程式、套件風險），不看是哪個工具回報的。趨勢請用 **`track`**：它在同一份報告內唯一，且不含訊息，所以工具改寫標題不會讓它改變。規則與位置相同的列（例如同一行有兩個機密）會用訊息的雜湊區分，這些列的 `track` 只能盡力維持穩定：同組的另一筆消失，或訊息被改寫時，它可能會變。**`id`** 是顯示用雜湊（包含訊息，工具有回報時也包含欄位）。被豁免的問題計入 `sources.*.suppressed`，不會默默消失。
+各工具的嚴重度統一對應到同一個等級（`rank` 0 = CRITICAL/BLOCKER … 4 = INFO，5 = 未評級 `—`）。`security` 依問題的性質判斷（相依套件、container、IaC、設定錯誤、漏洞、hotspot、機密、workflow、惡意程式、套件風險），不看是哪個工具回報的。趨勢請用 **`track`**：它在同一份報告內唯一，且不含訊息，所以工具改寫標題不會讓它改變。規則與位置相同的列（例如同一行有兩個機密）會用訊息的雜湊區分，這些列的 `track` 只能盡力維持穩定：同組的另一筆消失，或訊息被改寫時，它可能會變。**`id`** 是顯示用雜湊（包含訊息，工具有回報時也包含欄位）。被豁免的問題在工具有提供時計入 `sources.*.suppressed`：Snyk Code SARIF suppressions、zizmor `ignored`、Dependabot dismissed／auto_dismissed、以及即時讀取的 Sonar 已解決 issues。Snyk OSS／IaC／Container JSON 與匯出檔的 Sonar 不含豁免資訊，因此不會假裝算過。
 
 ## 安全注意事項
 

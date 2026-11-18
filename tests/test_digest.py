@@ -81,13 +81,13 @@ class Parsers(unittest.TestCase):
         self.assertTrue(st["ok"])
         self.assertIn("incomplete", st["note"])
         self.assertFalse(semgrep.load(tmpjson({"error": "x"}), "A")[1]["ok"])
-        # Partly parsed files: a note, and the source stays complete, unless asked otherwise.
+        # Partly parsed files are a coverage gap by default; opt out with partial_is_gap=False.
         warn = tmpjson({"results": [], "errors": [{"level": "warn"}]})
         _, st = semgrep.load(warn, "A")
-        self.assertEqual((st["complete"], st["note"]), (True, "1 file(s) only partly parsed"))
-        _, st = semgrep.load(warn, "A", partial_is_gap=True)
         self.assertEqual((st["complete"], st["note"]),
                          (False, "incomplete: 1 file(s) only partly parsed"))
+        _, st = semgrep.load(warn, "A", partial_is_gap=False)
+        self.assertEqual((st["complete"], st["note"]), (True, "1 file(s) only partly parsed"))
         # A hard error is a gap either way.
         hard = tmpjson({"results": [], "errors": [{"level": "error"}, {"level": "warn"}]})
         for gap in (False, True):
@@ -96,15 +96,21 @@ class Parsers(unittest.TestCase):
     def test_semgrep_partial_parse_setting_reaches_the_report_and_the_manifest(self):
         from qsd import runner
         f = tmpjson({"results": [], "errors": [{"level": "warn"}]})
+        # Omitted → default gap (complete False). Explicit False keeps complete.
+        src = build_payload({"projects": [{"name": "a", "semgrep": f}]})["sources"]["a: Semgrep"]
+        self.assertFalse(src["complete"])
         for flag in (False, True):
             src = build_payload({"projects": [{"name": "a", "semgrep": f,
                                                "semgrep_partial_is_gap": flag}]})["sources"]["a: Semgrep"]
             self.assertEqual(src["complete"], not flag)
         with tempfile.TemporaryDirectory() as d:
-            m, _ = runner.scan({"projects": [{"name": "a", "path": "."}],
-                                "semgrep_partial_is_gap": True}, d, os.path.join(d, "o"), tools=())
+            m, _ = runner.scan({"projects": [{"name": "a", "path": "."}]}, d, os.path.join(d, "o"),
+                               tools=())
             self.assertIs(m["projects"][0]["semgrep_partial_is_gap"], True)
             self.assertIs(m["settings"]["semgrep_partial_is_gap"], True)
+            m2, _ = runner.scan({"projects": [{"name": "a", "path": "."}],
+                                 "semgrep_partial_is_gap": False}, d, os.path.join(d, "o2"), tools=())
+            self.assertIs(m2["settings"]["semgrep_partial_is_gap"], False)
             with self.assertRaises(runner.ConfigError):
                 runner.validate({"projects": [{"name": "a", "path": "."}],
                                  "semgrep_partial_is_gap": "yes"}, d)
@@ -388,9 +394,15 @@ class EndToEnd(unittest.TestCase):
                                                      "ghsa_id": "GHSA-3", "identifiers": [], "cwes": []},
              "security_vulnerability": {"package": {"name": "z", "ecosystem": "npm"}},
              "dependency": {"manifest_path": "a/package.json"}},
+            {"state": "mystery", "security_advisory": {"severity": "low", "summary": "d",
+                                                       "ghsa_id": "GHSA-4", "identifiers": [], "cwes": []},
+             "security_vulnerability": {"package": {"name": "w", "ecosystem": "npm"}},
+             "dependency": {"manifest_path": "a/package.json"}},
         ]
         rows, st = dependabot.load(tmpjson(doc), "A")
         self.assertEqual((len(rows), st["suppressed"], st["counts"]["fixed"]), (1, 1, 1))
+        self.assertFalse(st["complete"])
+        self.assertIn("unrecognised state", st["note"])
 
     def test_malware_count_includes_malicious_packages(self):
         s = self.p["generated_from"][0]
@@ -505,7 +517,10 @@ class Runner(unittest.TestCase):
             validate({"projects": [ok]}, d)
             for bad in ("-Dsonar.host.url=http://evil", "-Dsonar.token=x", "-Dsonar.login=x",
                         "-Dsonar.projectKey=other", "-Dsonar.scanner.javaExePath=/usr/src/evil",
-                        "-Dsonar.scanner.dumpToFile=/tmp/x", "--rm", "sonar.sources=x", "-Xmx1g"):
+                        "-Dsonar.scanner.dumpToFile=/tmp/x", "-Dsonar.python.pylint=/usr/src/evil",
+                        "-Dsonar.javascript.node=/usr/src/evil",
+                        "-Dsonar.javascript.file.suffixes=.qqq",
+                        "--rm", "sonar.sources=x", "-Xmx1g"):
                 with self.assertRaises(ConfigError, msg=bad):
                     validate({"projects": [dict(ok, sonar_args=[bad])]}, d)
 
@@ -669,6 +684,11 @@ class ReviewFixes(unittest.TestCase):
         self.assertIs(get(commit_dirty=False), False)
         self.assertIs(get(commit_dirty=True), True)
         self.assertIs(get(commit_dirty=1), True)
+        self.assertIs(get(commit_dirty="false"), False)
+        self.assertIs(get(commit_dirty="true"), True)
+        self.assertIsNone(get(commit_dirty="maybe"))
+        html = render(build_payload({"projects": [{"name": "a"}]}))
+        self.assertIn("unknown dirty state", html)
 
     # -- Dependabot fetch
     def test_dependabot_fetch_asks_for_open_and_waived_alerts_exactly(self):
@@ -737,6 +757,19 @@ class ReviewFixes(unittest.TestCase):
         finally:
             runner.run = real
         self.assertIn("-Dsonar.host.url=http://sonarqube:9000", seen["cmd"])
+        self.assertIn("-Dsonar.nodejs.executable=node", seen["cmd"])
+
+    def test_checkout_sonar_properties_cannot_set_an_executable(self):
+        from qsd import runner
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "sonar-project.properties"), "w") as fh:
+                fh.write("sonar.nodejs.executable=/usr/src/evil\n")
+            with self.assertRaises(runner.SonarError) as ctx:
+                runner._reject_dangerous_sonar_properties(d)
+            self.assertIn("nodejs.executable", str(ctx.exception))
+            with open(os.path.join(d, "sonar-project.properties"), "w") as fh:
+                fh.write("sonar.sources=.\nsonar.sourceEncoding=UTF-8\n")
+            runner._reject_dangerous_sonar_properties(d)  # harmless keys OK
 
     def test_an_analysis_of_zero_lines_is_incomplete_not_clean(self):
         doc = {"issues": {"issues": [], "total": 0}, "hotspots": {"hotspots": [], "total": 0},

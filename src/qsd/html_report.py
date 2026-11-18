@@ -180,7 +180,13 @@ def render(payload):
                     f'{html.escape(v["note"])}</span>')
         if not v.get("complete", True):
             return f'<span class="chip part">◐ {html.escape(name)} — {html.escape(v["note"])}</span>'
-        extra = f' · {v["suppressed"]} waived' if v.get("suppressed") else ""
+        # A complete source can still carry a note (e.g. opt-out partial parse) — show it.
+        bits = []
+        if v.get("suppressed"):
+            bits.append(f'{v["suppressed"]} waived')
+        if v.get("note"):
+            bits.append(v["note"])
+        extra = (" — " + " · ".join(bits)) if bits else ""
         return f'<span class="chip on">✓ {html.escape(name)}{html.escape(extra)}</span>'
 
     chips = "".join(chip(n, v) for n, v in sources.items())
@@ -188,14 +194,17 @@ def render(payload):
     required_n = len(required)
     settings = payload.get("settings") or {}
     # Keep the subtitle short: only floors / mode, not the whole images map.
-    floor_keys = ("snyk_severity", "trivy_severity", "semgrep", "semgrep_mode", "dedup", "tools")
+    floor_keys = ("snyk_severity", "trivy_severity", "semgrep", "semgrep_mode",
+                  "semgrep_partial_is_gap", "dedup", "tools")
     floors = ", ".join(f"{k}: {settings[k]}" for k in floor_keys if settings.get(k) is not None)
-    dirty = sum(1 for s in summaries if s.get("commit_dirty"))
+    dirty = sum(1 for s in summaries if s.get("commit_dirty") is True)
+    unknown_dirty = sum(1 for s in summaries if s.get("commit_dirty") is None)
     subtitle = (f"{html.escape(payload.get('version') or '')} · <b>{len(rows)}</b> findings "
                 f"after merging {stats.get('input', len(rows))} sightings · "
                 f"{collected} of {len(sources)} sources collected"
                 f" · {required_n - gaps}/{required_n} required complete"
                 + (f" · {dirty} dirty checkout(s)" if dirty else "")
+                + (f" · {unknown_dirty} checkout(s) with unknown dirty state" if unknown_dirty else "")
                 + (f" · {html.escape(floors)}" if floors else ""))
     if gaps:
         banner = (f'<div class="banner">⚠ {gaps} required source(s) incomplete or missing — '

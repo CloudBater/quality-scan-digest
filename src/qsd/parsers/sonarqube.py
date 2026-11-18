@@ -83,6 +83,13 @@ def fetch(host, token, project_key):
     issues, total = fetch_all(host, token, "/api/issues/search",
                               {"components": project_key, "resolved": "false"}, "issues")
     doc = {"issues": {"issues": issues, "total": total}}
+    # Resolved / won't-fix issues are waived, not open findings — count only.
+    try:
+        resolved = api(host, token, "/api/issues/search",
+                       {"components": project_key, "resolved": "true", "ps": 1})
+        doc["suppressed"] = int((resolved.get("paging") or {}).get("total") or 0)
+    except (SonarError, Forbidden, TypeError, ValueError):
+        doc["suppressed"] = 0
     try:
         hs, htotal = fetch_all(host, token, "/api/hotspots/search",
                                {"project": project_key, "status": "TO_REVIEW"}, "hotspots")
@@ -160,4 +167,5 @@ def to_rows(doc, label, project_id=None):
             line=h.get("line"), ref=h.get("ruleKey", ""),
             col=(h.get("textRange") or {}).get("startOffset"),
         ))
-    return rows, status(note="; ".join(notes)), measures
+    return rows, status(note="; ".join(notes),
+                        suppressed=int(doc.get("suppressed") or 0)), measures

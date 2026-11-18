@@ -32,6 +32,9 @@ def _write(payload, json_out, html_out):
         if not v["complete"]:
             state = "incomplete" if v["collected"] else "not collected"
             print(f"  {state}: {name} - {v['note']}", file=sys.stderr)
+        elif v.get("note"):
+            # Complete-with-note (e.g. partial parse opted out of being a gap) must still show.
+            print(f"  note: {name} - {v['note']}", file=sys.stderr)
     return collected, complete, len(src)
 
 

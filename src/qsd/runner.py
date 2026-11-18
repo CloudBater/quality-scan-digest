@@ -60,21 +60,30 @@ class ConfigError(ValueError):
     pass
 
 
-# Allowlist only: a denylist still lets PR-edited config set javaExePath / scanner.*
-# and run a checkout-supplied binary with SONAR_TOKEN in the environment.
+# Exact allowlist only — language wildcards (javascript.*, python.*) accepted
+# executable-shaped and scope-hiding keys (node, pylint, file.suffixes).
 _SONAR_ARG = re.compile(r"^-Dsonar\.[A-Za-z0-9_.]+=.+$")
-_SONAR_ALLOWED = re.compile(
-    r"^sonar\.("
-    r"sources|tests|exclusions|inclusions|sourceEncoding|projectName|"
-    r"test\.(exclusions|inclusions)|"
-    r"coverage\.exclusions|cpd\.exclusions|"
-    r"scm\.exclusions|"
-    r"javascript\.[A-Za-z0-9_.]+|"
-    r"typescript\.[A-Za-z0-9_.]+|"
-    r"python\.[A-Za-z0-9_.]+|"
-    r"java\.(binaries|libraries|test\.binaries)"
-    r")$"
-)
+_SONAR_ALLOWED = frozenset({
+    "sonar.sources", "sonar.tests", "sonar.exclusions", "sonar.inclusions",
+    "sonar.sourceEncoding", "sonar.projectName",
+    "sonar.test.exclusions", "sonar.test.inclusions",
+    "sonar.coverage.exclusions", "sonar.cpd.exclusions", "sonar.scm.exclusions",
+    "sonar.java.binaries", "sonar.java.libraries", "sonar.java.test.binaries",
+    # Coverage / test report imports — paths to reports, not executables.
+    "sonar.javascript.lcov.reportPaths", "sonar.typescript.lcov.reportPaths",
+    "sonar.python.coverage.reportPaths", "sonar.python.xunit.reportPath",
+    "sonar.coverage.jacoco.xmlReportPaths", "sonar.junit.reportPaths",
+    "sonar.python.version",
+})
+# Properties a checkout's sonar-project.properties must not set: the scanner
+# container receives SONAR_TOKEN, so an executable override is a token-theft path.
+_SONAR_PROPS_FORBIDDEN_PREFIXES = ("sonar.scanner.", "sonar.host.", "sonar.login",
+                                   "sonar.password", "sonar.token")
+_SONAR_PROPS_FORBIDDEN = frozenset({
+    "sonar.nodejs.executable", "sonar.nodejs.forceExecutable",
+    "sonar.working.directory", "sonar.projectKey", "sonar.organization",
+    "sonar.scm.disabled", "sonar.scm.provider",
+})
 SEMGREP_MODES = ("auto", "ci", "public")
 
 
@@ -131,6 +140,25 @@ def _inside(base, *parts):
     return p
 
 
+def _reject_dangerous_sonar_properties(path):
+    """Refuse a checkout sonar-project.properties that redirects host/token/executables."""
+    props = os.path.join(path, "sonar-project.properties")
+    if not os.path.isfile(props):
+        return
+    try:
+        with open(props, encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError as exc:
+        raise SonarError(f"cannot read sonar-project.properties ({exc.__class__.__name__})") from exc
+    for raw in lines:
+        line = raw.split("#", 1)[0].strip()
+        if not line or "=" not in line:
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key in _SONAR_PROPS_FORBIDDEN or key.startswith(_SONAR_PROPS_FORBIDDEN_PREFIXES):
+            raise SonarError(f"sonar-project.properties sets forbidden {key}")
+
+
 def validate(config, base):
     projects = config.get("projects")
     if not isinstance(projects, list) or not projects:
@@ -151,10 +179,11 @@ def validate(config, base):
             if not _SONAR_ARG.match(str(arg)):
                 raise ConfigError(f"{name}: sonar_args entry {arg!r} must be -Dsonar.<key>=<value>")
             key = str(arg).split("=", 1)[0][2:]
-            if not _SONAR_ALLOWED.match(key):
+            if key not in _SONAR_ALLOWED:
                 raise ConfigError(f"{name}: sonar_args entry {arg!r} is not an allowed analysis "
-                                  f"property (no sonar.scanner.*, host, token, or executable overrides)")
-    if not isinstance(config.get("semgrep_partial_is_gap", False), bool):
+                                  f"property (exact allowlist only; no wildcards or executables)")
+    partial = config.get("semgrep_partial_is_gap", True)
+    if not isinstance(partial, bool):
         raise ConfigError("semgrep_partial_is_gap must be true or false")
     mode = config.get("semgrep_mode", "auto")
     if mode not in SEMGREP_MODES:
@@ -224,15 +253,19 @@ class Sonar:
 
     def scan(self, path, key, logfile, extra=()):
         log(f"SonarQube: {key}")
+        _reject_dangerous_sonar_properties(path)
         # Joins the compose network (no host networking), mounts the source
         # read-only, and takes the token from the environment, not argv.
         cmd = ["docker", "run", "--rm", "--network", f"{self.project}_default",
                "-v", f"{path}:/usr/src:ro", "-e", "SONAR_HOST_URL=http://sonarqube:9000",
                "-e", "SONAR_TOKEN", SCANNER_IMAGE,
                f"-Dsonar.projectKey={key}", "-Dsonar.scm.disabled=true",
-               # A sonar-project.properties in the checkout could otherwise set the host.
+               # A sonar-project.properties in the checkout could otherwise set the host
+               # or an executable that runs with SONAR_TOKEN; pin/clear those here.
                "-Dsonar.host.url=http://sonarqube:9000",
-               "-Dsonar.working.directory=/tmp/.scannerwork"]
+               "-Dsonar.working.directory=/tmp/.scannerwork",
+               # Force the image's `node` on PATH — never a checkout-supplied binary.
+               "-Dsonar.nodejs.executable=node"]
         cmd.extend(extra)
         if not os.path.exists(os.path.join(path, "sonar-project.properties")) \
                 and not any(str(a).startswith("-Dsonar.sources=") for a in extra):
@@ -363,7 +396,7 @@ def scan(config, base, out_dir, version="", tools=TOOLS):
                 "trivy_severity": config.get("trivy_severity", "CRITICAL,HIGH"),
                 "semgrep": _semgrep_label(config.get("semgrep_mode", "auto")),
                 "semgrep_mode": config.get("semgrep_mode", "auto"),
-                "semgrep_partial_is_gap": bool(config.get("semgrep_partial_is_gap", False)),
+                "semgrep_partial_is_gap": bool(config.get("semgrep_partial_is_gap", True)),
                 "tools": ",".join(tools),
                 # Digests actually referenced this run — pin ≠ what ran if PATH wins.
                 "images": {
@@ -381,7 +414,7 @@ def scan(config, base, out_dir, version="", tools=TOOLS):
         projects.append({"cfg": p, "path": path, "name": p["name"], "out": {
             "name": p["name"], "label": p.get("label") or p["name"],
             "repo": p.get("repo", ""), "commit": sha, "commit_dirty": dirty, "notes": {},
-            "semgrep_partial_is_gap": bool(config.get("semgrep_partial_is_gap", False))}})
+            "semgrep_partial_is_gap": bool(config.get("semgrep_partial_is_gap", True))}})
 
     shim = _python_shim() if "snyk" in tools else None
     sonar = None

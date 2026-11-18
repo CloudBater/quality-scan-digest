@@ -12,12 +12,16 @@ All notable changes to this project are documented here. The format follows
   Gitleaks now keeps `StartColumn` so same-line secrets stay distinct too.
 - HTML "Security crit + high" turns green only when every *required* source is complete;
   a zero under a gap is no longer painted as clean. Incomplete runs get a banner.
-- Semgrep files it could only partly parse (`warn`) are a note and the source stays complete
-  by default (they are the normal state of a real repo: 91 and 19 on a Django and a Next.js
-  repository, which would make every strict run exit 2); `semgrep_partial_is_gap: true` makes
-  them a gap. A hard Semgrep error is always incomplete.
-- `sonar_args` is an allowlist of analysis properties — `sonar.scanner.javaExePath` and
-  other executable / host / token overrides are rejected.
+- Semgrep files it could only partly parse (`warn`) are a **coverage gap by default**
+  (complete=false). Noisy repos may set `semgrep_partial_is_gap: false` to keep the source
+  complete with a note; that note still appears on the HTML chip and on stderr. A hard
+  Semgrep error is always incomplete.
+- `sonar_args` is an **exact** allowlist (no `javascript.*` / `python.*` wildcards) —
+  `sonar.scanner.javaExePath`, `sonar.python.pylint`, `sonar.javascript.node`,
+  `file.suffixes`, host, token overrides are rejected. The scanner command pins
+  `sonar.nodejs.executable=node`, and a checkout `sonar-project.properties` that sets
+  host / token / scanner.* / nodejs.executable is refused.
+- Live Sonar fetches count resolved issues under `sources.*.suppressed` (file exports stay 0).
 - `track` is unique within a report. It is location and identity without the message, so it
   survives a scanner rewording a title; rows whose key collides (same rule, file and line,
   different message) are told apart by a hash of the message, and identical rows with dedup
@@ -44,7 +48,8 @@ All notable changes to this project are documented here. The format follows
 - `--strict` together with `--lenient` is an error instead of silently lenient.
 - `sonar_args` also accepts `sonar.sourceEncoding` and `sonar.projectName` (harmless metadata a real project needs).
 - `commit_dirty` is `null` when git status is unknown, and when a manifest omits it
-  (it used to default to `false`, "clean").
+  (it used to default to `false`, "clean"). HTML shows "unknown dirty state"; the string
+  `"false"` is not coerced to true.
 - GuardDog always appears in `sources` (skipped / not configured), even with no manifests;
   an unconfigured GuardDog is optional (see above).
 - Malware tile counts ClamAV `Malware` **and** OSV/GuardDog `Malicious Package`.
@@ -54,8 +59,9 @@ All notable changes to this project are documented here. The format follows
 ### Added
 - `track`: stable finding key (no message) for trend diffs; `id` still
   includes the message and remains the display hash.
-- `sources.*.suppressed`: waived Snyk suppressions, zizmor `ignored`, and non-open
-  Dependabot alerts are counted instead of vanishing.
+- `sources.*.suppressed`: Snyk Code SARIF suppressions, zizmor `ignored`, Dependabot
+  dismissed/auto_dismissed, and (live) Sonar resolved issues are counted — not every
+  scanner (Snyk OSS JSON and file-exported Sonar do not surface waivers).
 - `sources.*.optional`: tools left out of `--tools` still appear in `sources` so a
   screenshot cannot hide the rest of the coverage contract; they do not fail `--strict`.
 - Project `sec_unrated`, `malware`, `commit_dirty`; settings `tools`, `images`, `runners`.

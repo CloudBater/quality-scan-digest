@@ -2,6 +2,7 @@
 
 Open alerts become findings. Dismissed / auto_dismissed alerts count as
 `suppressed` (waived). Fixed alerts are counted separately and are not "waived".
+An unrecognised state is a coverage gap — it must not vanish as a clean source.
 """
 
 from ..model import finding
@@ -22,7 +23,7 @@ def load(path, label, project_id=None):
         msg = alerts.get("message", "") if isinstance(alerts, dict) else ""
         return failed(f"not a list of alerts{': ' + msg if msg else ''}")
 
-    by_sev, rows, seen, suppressed, fixed = {}, [], set(), 0, 0
+    by_sev, rows, seen, suppressed, fixed, unknown = {}, [], set(), 0, 0, 0
     for a in alerts:
         state = a.get("state", "open")
         if state in _WAIVED:
@@ -32,6 +33,7 @@ def load(path, label, project_id=None):
             fixed += 1
             continue
         if state != "open":
+            unknown += 1
             continue
         adv = a.get("security_advisory") or {}
         vuln = a.get("security_vulnerability") or {}
@@ -60,5 +62,6 @@ def load(path, label, project_id=None):
         ))
     counts = {"total": sum(by_sev.values()), "unique": len(rows), "by_sev": by_sev,
               "fixed": fixed}
-    # Fixed alerts live in counts only — a note would mark the source incomplete.
-    return rows, status(counts=counts, suppressed=suppressed)
+    note = (f"incomplete: {unknown} alert(s) with unrecognised state"
+            if unknown else "")
+    return rows, status(note=note, complete=not unknown, counts=counts, suppressed=suppressed)
