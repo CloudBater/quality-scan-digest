@@ -86,7 +86,7 @@ _SONAR_ALLOWED = frozenset({
 # SonarCloud-style `sonar.projectKey=myapp` line is common in real repositories.
 _SONAR_PROPS_FORBIDDEN_PREFIXES = ("sonar.scanner.", "sonar.login", "sonar.password",
                                    "sonar.token")
-_SONAR_PROPS_FORBIDDEN = frozenset({"sonar.nodejs.forceExecutable"})
+_SONAR_PROPS_FORBIDDEN = frozenset({"sonar.nodejs.forceExecutable", "sonar.userHome"})
 SEMGREP_MODES = ("auto", "ci", "public")
 
 
@@ -178,7 +178,10 @@ def _properties_keys(text):
     pending line at EOF, could be bypassed.
     """
     keys, logical, carry = [], "", False
-    for raw in text.splitlines():
+    # NOT str.splitlines(): it also breaks at \f, \v, \x1c-\x1e, \x85, U+2028 and U+2029, which
+    # Java does not. "# comment<FF>x \" then a forbidden key would be one continued comment to
+    # Java but two lines to Python, and the forbidden key would be swallowed.
+    for raw in re.split(r"\r\n|\r|\n", text):
         line = raw if carry else raw.lstrip(" \t\f")
         if not carry and (not line or line[0] in "#!"):
             continue
@@ -327,6 +330,10 @@ class Sonar:
                # or an executable that runs with SONAR_TOKEN; pin/clear those here.
                "-Dsonar.host.url=http://sonarqube:9000",
                "-Dsonar.working.directory=/tmp/.scannerwork",
+               # The scanner reuses a cached engine/plugin jar from its user home, so a
+               # checkout that moved it to /usr/src could make the JVM (which holds
+               # SONAR_TOKEN) run checkout-supplied code. Pinned here: the command line wins.
+               "-Dsonar.userHome=/tmp/.sonar",
                # Force the image's `node` on PATH — never a checkout-supplied binary.
                "-Dsonar.nodejs.executable=node"]
         cmd.extend(extra)
@@ -789,7 +796,7 @@ def _clamav(path, out, logfile, notes, settings=None):
     which refreshes its signatures in the same container before scanning."""
     native = have("clamscan") and _clamav_db_ready()
     if native:
-        cmd, cwd = ["clamscan", "-r", "--infected", "--no-summary", "--stdout", "."], path
+        cmd, cwd = ["clamscan", "-r", "--infected", "--stdout", "."], path
         runner = "native"
     elif have("docker"):
         # freshclam failure must not silently look like a clean scan: the marker
@@ -798,7 +805,7 @@ def _clamav(path, out, logfile, notes, settings=None):
                "-v", f"{path}:/scan:ro", CLAMAV_IMAGE, "-c",
                "if ! freshclam --quiet >/dev/null 2>&1; then "
                "echo '# qsd: freshclam failed'; fi; "
-               "cd /scan && clamscan -r --infected --no-summary --stdout ."]
+               "cd /scan && clamscan -r --infected --stdout ."]
         cwd = None
         runner = "container"
     else:

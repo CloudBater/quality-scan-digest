@@ -1252,5 +1252,105 @@ class ReviewRound3(unittest.TestCase):
         self.assertIn("# qsd: freshclam failed", " ".join(seen["cmd"]))
 
 
+class ReviewRound4(unittest.TestCase):
+    """Opus final review: each test fails if its fix is reverted."""
+
+    def reject(self, text):
+        from qsd import runner
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "sonar-project.properties"), "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        runner._reject_dangerous_sonar_properties(d)
+
+    def test_lines_end_only_at_the_characters_java_ends_them(self):
+        from qsd import runner
+        # Python's str.splitlines() also splits on these; Java does not. A comment ending in
+        # one of them plus a trailing backslash must not swallow the next (forbidden) key.
+        for ch in ("\x0c", "\x0b", "\x85", "\u2028", "\u2029", "\x1c", "\x1d", "\x1e"):
+            text = f"# harmless comment{ch}see below \\\nsonar.scanner.proxyHost=attacker\nsonar.sources=x\n"
+            with self.assertRaises(runner.SonarError, msg=repr(ch)):
+                self.reject(text)
+        self.assertEqual(runner._properties_keys("a=1\r\nb=2\rc=3\nd=4"), ["a", "b", "c", "d"])
+
+    def test_a_key_split_across_a_continuation_with_leading_spaces_is_still_found(self):
+        from qsd import runner
+        self.assertEqual(runner._properties_keys("sonar.lo\\\n   gin=x\n"), ["sonar.login"])
+        with self.assertRaises(runner.SonarError):
+            self.reject("sonar.lo\\\n   gin=x\n")
+
+    def test_the_scanner_user_home_is_pinned_and_forbidden_in_the_file(self):
+        from qsd import runner
+        seen = {}
+        real = runner.run
+        def fake(cmd, logfile, cwd=None, env=None):
+            seen["cmd"] = cmd
+            open(logfile, "w").close()
+            return 1
+        runner.run = fake
+        try:
+            d = tempfile.mkdtemp()
+            s = runner.Sonar(d)
+            try:
+                s.scan(d, "k", os.path.join(d, "x.log"))
+            except runner.SonarError:
+                pass
+            finally:
+                shutil_rmtree(s.secret_dir)
+        finally:
+            runner.run = real
+        self.assertIn("-Dsonar.userHome=/tmp/.sonar", seen["cmd"])
+        with self.assertRaises(runner.SonarError):
+            self.reject("sonar.userHome=/usr/src/evil\n")
+
+    def test_clamav_needs_its_scan_summary_to_count_as_a_finished_scan(self):
+        mk = lambda text: os.path.join(tempfile.mkdtemp(), "c.txt")
+        for content in ("", "{}", "hello", "# qsd clamav\n"):
+            f = mk(content)
+            with open(f, "w") as fh:
+                fh.write(content)
+            _, st = clamav.load(f, "A")
+            self.assertFalse(st["complete"], repr(content))
+            self.assertIn("no scan summary", st["note"])
+        f = mk("")
+        with open(f, "w") as fh:
+            fh.write("----------- SCAN SUMMARY -----------\nScanned files: 0\nInfected files: 0\n")
+        _, st = clamav.load(f, "A")
+        self.assertFalse(st["complete"])
+        self.assertIn("scanned 0 files", st["note"])
+        self.assertTrue(clamav.load(fx("clamav.txt"), "A")[1]["complete"])
+
+    def test_clamav_commands_keep_the_summary_on(self):
+        from qsd import runner
+        for native in (True, False):
+            seen = {}
+            real = (runner.have, runner._clamav_db_ready, subprocess.run)
+            runner.have = lambda t: True
+            runner._clamav_db_ready = lambda n=native: n
+            subprocess.run = lambda cmd, **kw: (seen.update(cmd=cmd) or subprocess.CompletedProcess(cmd, 0))
+            try:
+                d = tempfile.mkdtemp()
+                runner._clamav(d, os.path.join(d, "c.txt"), os.path.join(d, "l.log"), {})
+            finally:
+                runner.have, runner._clamav_db_ready, subprocess.run = real
+            self.assertNotIn("--no-summary", " ".join(seen["cmd"]), native)
+
+    def test_the_manifest_settings_default_governs_partly_parsed_files(self):
+        f = tmpjson({"results": [], "errors": [{"level": "warn", "path": "a.py"}]})
+        mk = lambda settings, **proj: build_payload({"settings": settings, "projects": [
+            dict({"name": "a", "semgrep": f}, **proj)]})["sources"]["a: Semgrep"]["complete"]
+        self.assertTrue(mk({}))
+        self.assertFalse(mk({"semgrep_partial_is_gap": True}))
+        self.assertTrue(mk({"semgrep_partial_is_gap": True}, semgrep_partial_is_gap=False))
+
+    def test_colliding_tracks_differ_by_message_not_by_an_ordinal(self):
+        t = {"SchemaVersion": 2, "Results": [{"Target": "Dockerfile", "Misconfigurations": [
+            {"ID": "DS-1", "Message": "secret A", "Severity": "HIGH", "CauseMetadata": {"StartLine": 7}},
+            {"ID": "DS-1", "Message": "secret B", "Severity": "HIGH", "CauseMetadata": {"StartLine": 7}}]}]}
+        tracks = [r["track"] for r in build_payload({"projects": [
+            {"name": "a", "trivy": {"Config": tmpjson(t)}}]})["findings"]]
+        self.assertEqual(len(set(tracks)), 2)
+        self.assertFalse(any(x.endswith(("-2", "-3")) for x in tracks), tracks)
+
+
 if __name__ == "__main__":
     unittest.main()

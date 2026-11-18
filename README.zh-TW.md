@@ -149,7 +149,7 @@ Dependabot 以 `open,dismissed,auto_dismissed` 抓取：被 dismiss 的警示計
 }
 ```
 
-各工具的嚴重度統一對應到同一個等級（`rank` 0 = CRITICAL/BLOCKER … 4 = INFO，5 = 未評級 `—`）。`security` 依問題的性質判斷（相依套件、container、IaC、設定錯誤、漏洞、hotspot、機密、workflow、惡意程式、套件風險），不看是哪個工具回報的。趨勢請用 **`track`**：它在同一份報告內唯一，且不含訊息，所以工具改寫標題不會讓它改變。規則與位置相同的列（例如同一行有兩個機密）會用訊息的雜湊區分，這些列的 `track` 只能盡力維持穩定：同組的另一筆消失，或訊息被改寫時，它可能會變。**`id`** 是顯示用雜湊（包含訊息，工具有回報時也包含欄位）。被豁免的問題在工具有提供時計入 `sources.*.suppressed`：Snyk Code SARIF suppressions、zizmor `ignored`、Dependabot dismissed／auto_dismissed、以及即時讀取的 Sonar 已解決 issues。Snyk OSS／IaC／Container JSON 與匯出檔的 Sonar 不含豁免資訊，因此不會假裝算過。
+各工具的嚴重度統一對應到同一個等級（`rank` 0 = CRITICAL/BLOCKER … 4 = INFO，5 = 未評級 `—`）。`security` 依問題的性質判斷（相依套件、container、IaC、設定錯誤、漏洞、hotspot、機密、workflow、惡意程式、套件風險），不看是哪個工具回報的。趨勢請用 **`track`**：它在同一份報告內唯一，且不含訊息，所以工具改寫標題不會讓它改變。規則與位置相同的列（例如同一行有兩個機密）會用訊息的雜湊區分，這些列的 `track` 只能盡力維持穩定：同組的另一筆消失，或訊息被改寫時，它可能會變。**`id`** 是顯示用雜湊（包含訊息，工具有回報時也包含欄位）。被豁免的問題在工具有提供時計入 `sources.*.suppressed`：Snyk Code SARIF suppressions、zizmor `ignored`、Dependabot dismissed／auto_dismissed、以及 SonarQube 中狀態為 ACCEPTED 或 FALSE_POSITIVE 的 issues（不含已修復的）。`qsd scan` 也會匯出 SonarQube 的豁免數量，所以拿它的原始輸出做 digest 也看得到。Snyk OSS／IaC／Container JSON 不含豁免資訊，因此不會假裝算過；讀不到 SonarQube 豁免數量時，來源會寫「waived-issue count unavailable」，而不是 0。SonarQube 豁免數量需要 10.4 以上的伺服器（較舊的伺服器可能忽略 `issueStatuses`，數字會偏高）。
 
 ## 安全注意事項
 

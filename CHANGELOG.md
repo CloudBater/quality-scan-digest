@@ -50,6 +50,16 @@ All notable changes to this project are documented here. The format follows
   refused because it would resolve inside the scanner container.
 - `sources.*.partial` counts distinct files, not warnings (88 files from 91 warnings on a
   real backend). The waived-issue count survives the export-to-digest round trip.
+- `sonar-project.properties` is split into lines the way Java does (only at `\n`, `\r`,
+  `\r\n`), not with Python's `splitlines()`, which also breaks at form feed, NEL and U+2028:
+  a comment ending in one of those plus a trailing backslash could hide a forbidden key. The
+  scanner's `sonar.userHome` is pinned on the command line and refused in the file, so a
+  checkout cannot move the scanner's engine/plugin cache to code it supplied.
+- ClamAV is complete only when its scan summary (`Scanned files: N`, N > 0) is present: an
+  empty file, `{}` or any text used to read as a finished, clean scan on the digest path.
+  The scan no longer passes `--no-summary` to `clamscan`.
+- In a hand-written manifest, `settings.semgrep_partial_is_gap` is the default for projects
+  that do not set it, so the HTML subtitle and the scan cannot disagree.
 - `track` is unique within a report. It is location and identity without the message, so it
   survives a scanner rewording a title; rows whose key collides (same rule, file and line,
   different message) are told apart by a hash of the message, and identical rows with dedup

@@ -94,6 +94,12 @@ def validate(manifest):
             p["commit_dirty"] = dirty.strip().lower() == "true"
         else:
             p["commit_dirty"] = None
+    # `semgrep_partial_is_gap` is per project; settings (which the HTML subtitle prints)
+    # supplies the default, so the page can never say `true` while the scan treats it as false.
+    top = (manifest.get("settings") or {}).get("semgrep_partial_is_gap")
+    if isinstance(top, bool):
+        for p in projects:
+            p.setdefault("semgrep_partial_is_gap", top)
     manifest["title"] = _s(manifest.get("title"))
     manifest["version"] = _s(manifest.get("version"))
     return manifest

@@ -217,7 +217,8 @@ or false positive (not fixed ones).
 Snyk Open Source / IaC / Container JSON does not include waivers, so those stay uncounted
 rather than silently zero. If a SonarQube waived-issue count cannot be read, the source says
 "waived-issue count unavailable" instead of reporting 0. `qsd scan` exports the SonarQube
-count, so a digest of its raw outputs carries it too.
+count, so a digest of its raw outputs carries it too. The count needs SonarQube 10.4 or newer:
+an older server may ignore the `issueStatuses` filter and over-count.
 
 ## Security notes
 

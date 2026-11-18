@@ -42,9 +42,7 @@ def load(path, label, project_id=None, partial_is_gap=False):
         ))
 
     # Errors and results are independent: findings from some files do not make
-    # up for files that failed or only partly parsed. A partial parse is a coverage
-    # gap by default — counting it complete paints a green zero under a hole.
-    # Set semgrep_partial_is_gap=false for noisy repos that only want a note.
+    # up for files that failed to scan. Partly parsed files are handled below.
     errs = doc.get("errors") or []
     hard = [e for e in errs if str(e.get("level", "error")).lower() != "warn"]
     soft = [e for e in errs if e not in hard]
