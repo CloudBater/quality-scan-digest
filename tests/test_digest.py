@@ -764,7 +764,10 @@ class ReviewFixes(unittest.TestCase):
         finally:
             runner.run = real
         self.assertIn("-Dsonar.host.url=http://sonarqube:9000", seen["cmd"])
-        self.assertIn("-Dsonar.nodejs.executable=node", seen["cmd"])
+        # A PATH, not the bare command name: `node` is read as a file name and the JS/TS
+        # analysis then fails with "Node.js executable file does not exist".
+        self.assertIn("-Dsonar.nodejs.executable=/usr/bin/node", seen["cmd"])
+        self.assertNotIn("-Dsonar.nodejs.executable=node", seen["cmd"])
 
     def test_checkout_sonar_properties_cannot_set_an_executable(self):
         from qsd import runner
@@ -1350,6 +1353,68 @@ class ReviewRound4(unittest.TestCase):
             {"name": "a", "trivy": {"Config": tmpjson(t)}}]})["findings"]]
         self.assertEqual(len(set(tracks)), 2)
         self.assertFalse(any(x.endswith(("-2", "-3")) for x in tracks), tracks)
+
+
+class GitCheckoutsInContainers(unittest.TestCase):
+    """Gitleaks scans a worktree or submodule from a container: git needs its git directory."""
+
+    def worktree(self):
+        d = tempfile.mkdtemp()
+        common = os.path.join(d, "main", ".git", "modules", "be")
+        gitdir = os.path.join(common, "worktrees", "wt")
+        os.makedirs(gitdir)
+        with open(os.path.join(gitdir, "commondir"), "w") as fh:
+            fh.write("../..\n")
+        checkout = os.path.join(d, "wt")
+        os.mkdir(checkout)
+        with open(os.path.join(checkout, ".git"), "w") as fh:
+            fh.write(f"gitdir: {gitdir}\n")
+        return checkout, common, gitdir
+
+    def test_a_worktree_mounts_its_common_git_dir_at_the_path_the_dotgit_file_expects(self):
+        from qsd.runner import _git_mounts
+        checkout, common, _ = self.worktree()
+        self.assertEqual(_git_mounts(checkout), ["-v", f"{common}:{common}:ro"])
+
+    def test_a_submodule_mounts_its_relative_gitdir_where_the_container_will_look(self):
+        from qsd.runner import _git_mounts
+        d = tempfile.mkdtemp()
+        host = os.path.join(d, ".git", "modules", "x")
+        os.makedirs(host)
+        checkout = os.path.join(d, "sub")
+        os.mkdir(checkout)
+        with open(os.path.join(checkout, ".git"), "w") as fh:
+            fh.write("gitdir: ../.git/modules/x\n")
+        self.assertEqual(_git_mounts(checkout), ["-v", f"{host}:/.git/modules/x:ro"])
+
+    def test_a_plain_repository_or_no_repository_needs_no_extra_mount(self):
+        from qsd.runner import _git_mounts
+        plain = tempfile.mkdtemp()
+        os.mkdir(os.path.join(plain, ".git"))
+        self.assertEqual(_git_mounts(plain), [])
+        self.assertEqual(_git_mounts(tempfile.mkdtemp()), [])
+        odd = tempfile.mkdtemp()
+        with open(os.path.join(odd, ".git"), "w") as fh:
+            fh.write("not a gitdir line")
+        self.assertEqual(_git_mounts(odd), [])
+
+    def test_the_gitleaks_container_command_carries_those_mounts(self):
+        from qsd import runner
+        checkout, common, _ = self.worktree()
+        seen = {}
+        real = (runner.have, subprocess.run)
+        runner.have = lambda t: t == "docker"
+        subprocess.run = lambda cmd, **kw: (seen.update(cmd=cmd) or subprocess.CompletedProcess(cmd, 0))
+        try:
+            d = tempfile.mkdtemp()
+            runner._gitleaks({"name": "a"}, checkout, os.path.join(d, "g.json"),
+                             os.path.join(d, "l.log"), {})
+        finally:
+            runner.have, subprocess.run = real
+        cmd = seen["cmd"]
+        self.assertIn(f"{common}:{common}:ro", cmd)
+        self.assertIn(f"{checkout}:/repo:ro", cmd)
+        self.assertLess(cmd.index(f"{common}:{common}:ro"), cmd.index(runner.GITLEAKS_IMAGE))
 
 
 if __name__ == "__main__":

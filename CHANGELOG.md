@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-11-18
+
+### Fixed
+- **SonarQube failed on any repository with JavaScript or TypeScript** (the backend has
+  some too) with "Node.js executable file does not exist". 0.4.0 passed
+  `-Dsonar.nodejs.executable=node`, but that property takes a path: the bare command name is
+  read as a file name. It is now `/usr/bin/node`, where the pinned scanner image keeps Node.
+  A pure-Python test project had hidden this; the test that asserted the broken value is
+  corrected.
+- **Gitleaks failed on a git worktree or a submodule** ("not a git repository"). In those
+  checkouts `.git` is a file pointing outside the folder, and only the folder was mounted into
+  the container. The git directory (and the common one a worktree shares) is now mounted
+  read-only where the `.git` file expects it. A plain repository needs nothing extra.
+
 ## [0.4.0] - 2026-11-17
 
 ### Fixed
